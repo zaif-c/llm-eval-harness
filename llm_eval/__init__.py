@@ -13,16 +13,11 @@ Modules, in pipeline order:
     harness:  Batch inference runner with retry/backoff
     scoring:  Ground-truth scoring (exact, token F1, BLEU, ROUGE, char similarity, semantic)
     judge:    LLM-as-judge scoring with logprob weighting
-    analysis: Meta-evaluation — grades the judge against ground truth
 
 The dependency direction is one-way: judge.py imports from harness.py (for the
-shared retry policy and checkpoint), analysis.py sits above both scorers, and
-nothing imports back down into harness.py. That is what keeps the inference
-layer unaware of how its output will be scored.
-
-The `analysis/` directory at the repo root is a different thing from
-`llm_eval/analysis.py`: the module holds reusable primitives that the pipeline
-itself calls, the directory holds exploratory scripts that import them.
+shared retry policy and checkpoint), and nothing imports back down into
+harness.py. That is what keeps the inference layer unaware of how its output
+will be scored.
 
 Configuration:
     Set these in your .env file:
@@ -71,19 +66,6 @@ from llm_eval.scoring import (
     print_metrics,
     score_histogram,
     normalize_text,
-)
-
-# Meta-evaluation exports. These grade the judge rather than the model, and are
-# the layer the scripts in analysis/ build on.
-from llm_eval.analysis import (
-    judge_agreement,
-    find_disagreements,
-    find_unstable_prompts,
-    print_agreement,
-    print_disagreements,
-    print_variance,
-    roc_auc,
-    variance_report,
 )
 
 # Judge exports. Rubric is exported alongside the prebuilt ones because writing

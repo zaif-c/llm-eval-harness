@@ -129,19 +129,15 @@ The final frame is rebuilt in dataset order from the resumed and fresh rows toge
 
 **Distributions, not just means.** Every score column reports `p25`/`median`/`p75` and a histogram alongside mean and std: per-value counts when there are few distinct values, binned otherwise. The mean is the statistic most likely to mislead here, because the two most common outcomes are bimodal (exact match is a pile at 0 and a pile at 1, and its mean is really a pass rate) and saturated (a helpfulness judge that gives nearly everything a 5). Both look unremarkable as a mean and obvious as a distribution, and "the judge saturates" is a more useful presentation finding than "the mean was 4.8".
 
-**The judge is measured against ground truth, not assumed to work.** The judge exists to score open-ended data, where by definition there is no gold answer to check it against — so its credibility can never be established on the data it is actually used for. The only place it can be established is a labeled set, where a rubric score and a known-correct answer exist for the same row. `llm_eval/analysis.py` runs that comparison automatically whenever a labeled dataset is run with `--judge`. No flag, because when both scorers have already run the comparison is free, and it is the last thing that should be lost to a forgotten argument.
+**The automated meta-evaluation layer was built, then cut.** `llm_eval/analysis.py` and the `analysis/` directory scored the judge against ground truth — separation, ROC-AUC (hand-rolled from the Mann-Whitney identity), Spearman, Pearson, and the individual rows where the two scorers most disagreed. It was removed for the same reason `--n-samples` was: 650 lines of statistics that would not be reached for inside a 90-minute block, and a layer that cannot be half-understood on a slide. `main` still has it.
 
-Four statistics, each answering a different question. **Separation** (mean judge score on correct answers minus incorrect) leads, because it is the sanity check: near zero means the judge is not tracking correctness at all and no coefficient will rescue it. **ROC-AUC** is the assumption-free version of the same claim — it uses only ordering, so it needs no pretense that a 1–5 rubric and a 0/1 label are commensurable, and midranks make a tie contribute exactly 0.5. **Spearman** is the primary correlation because it assumes only monotonicity, which is all there is reason to expect between a rubric and an F1. **Pearson** is reported because it is expected, but it is the weaker claim, and against binary ground truth it is just the point-biserial correlation.
+What survives the cut is the *reasoning*, which is the part worth being able to say out loud:
 
-AUC is hand-rolled from its Mann-Whitney relationship rather than imported: `(Σ positive ranks − n₊(n₊+1)/2) / (n₊n₋)`. Five lines, no scipy or scikit-learn dependency, and nothing opaque to defend live. Cross-checked against `sklearn.roc_auc_score` on 200 random samples.
+The judge has a circularity problem. It is used precisely where there is no gold answer, which is exactly where it cannot be checked. The only place its credibility can be established is a labeled set, where a rubric score and a known-correct answer exist on the same row — and then that credibility has to be *transferred* to the unlabeled data, which is an assumption, not a proof. The asymmetry is what makes it matter: on open-ended data a judge's false positives are invisible by construction, because nothing contradicts them.
 
-**Agreement is computed against four ground-truth columns, because the contrast between them is the diagnostic.** A judge that agrees with `semantic_score` but not `exact_match` is rewarding answers that sound right. A judge that agrees with `contains_expected` but not `exact_match` is not wrong at all — `exact_match` is penalizing verbosity and the judge is reading the answer correctly. That second case is detected automatically: when `contains_expected` exceeds `exact_match` by 0.2 or more, the report states that exact_match is scoring output format rather than correctness.
+**The concrete finding from that work is still the most useful thing in this file.** On the 16-question hard set the model answered **every question correctly**, yet `exact_match` scored 9 of them zero because the answers came back as sentences instead of bare strings. Agreement between the judge and `exact_match` came out at AUC 0.429 — below chance — which reads as a broken judge and was actually a mismatched metric. Since a labeled run with `--judge` now prints both columns without comparing them, **check `exact_match` against `contains_expected` by eye.** A large gap between them means `exact_match` is scoring output format, not correctness, and the fix is `--cot` or a stricter prompt rather than a different model.
 
-That warning exists because the live test produced exactly it. On the 16-question hard set the model answered **every question correctly**, yet `exact_match` scored 9 of them zero because the answer came back as a sentence instead of a bare string. AUC was 0.429 — below chance — which reads as a broken judge and is actually a mismatched metric. The symptom is counterintuitive enough to burn real time under a clock, so the tool now says it out loud.
-
-**Disagreements are returned as rows to read, not as a number.** A signed gap narrows the cause without settling it: a positive gap means *either* the judge over-credited a wrong answer *or* the ground-truth metric is too strict for that answer format, and only the text distinguishes them. An aggregate agreement figure cannot express that, which is why the top conflicting rows are printed and written to `<run_id>_disagreements.csv`. The judge's false positives are the important direction, since on open-ended data that error is invisible by construction.
-
-**`llm_eval/analysis.py` and the `analysis/` directory are deliberately different things.** The module holds reusable primitives that the pipeline itself imports and that have unit tests. The directory holds exploratory scripts that import those primitives and add ad-hoc slicing. The split is forced by `run_eval.py` needing to import the statistics — the pipeline should not depend on a scratch folder — and it keeps one implementation of the math rather than a pipeline copy and a notebook copy that drift.
+Related, and worth keeping in mind whenever two scorers disagree: a disagreement says one of them is wrong and does not say which. A judge scoring higher than the ground-truth metric means *either* the judge over-credited a wrong answer *or* the metric is too strict for that answer format. Only reading the row settles it.
 
 **Row identity is `prompt_id`.** One prompt produces one row. Resume maps and result maps in `batch_run` and `judge_batch` key on `str(prompt_id)` so an int id in the source JSON still matches the same id written as a string in the checkpoint.
 
@@ -235,26 +231,16 @@ The prompt forces the model to reason, then emit `SCORE: N`. Only the token in t
 
 If there is no `SCORE:` marker, or that provider has no logprobs, `judge_score` comes from the text parser and `score_method` is `text`.
 
-## `llm_eval/analysis.py`
+## Removed on this branch
 
-Grades the judge, not the model. Only has anything to do when both scorers ran on the same rows.
+Two features were built, measured, and then deliberately cut. Both are on `main` and restore with `git checkout main -- <path>`.
 
-| Function | What it does |
-| --- | --- |
-| `DEFAULT_GT_COLS` | `exact_match`, `contains_expected`, `token_f1`, `semantic_score`. Four different notions of "correct"; the contrast between them is the diagnostic. |
-| `roc_auc` | AUC from ranks via the Mann-Whitney identity. Ties get midranks and contribute 0.5. Returns `None` when one class is absent, since AUC is undefined without both. |
-| `_is_binary` | Detects a 0/1 column from the data rather than a name list, so a custom binary metric is handled without editing this file. |
-| `_correlations` | Spearman and Pearson, both `None` on zero variance. A constant column is "not computable", not `nan`. |
-| `judge_agreement` | The report: per-column separation, AUC, correlations, plus warnings for small `n`, single-class ground truth, and format mismatch. Pairwise-complete per column, so one metric's nulls do not shrink the sample for the others. Returns `None` when the comparison is impossible. |
-| `find_disagreements` | Rows sorted by absolute gap. Judge score is normalized against the *nominal* rubric scale, not the observed range — using the observed range would stretch a 4.0 down to 0 on a run where everything scored 4–5. |
-| `print_agreement` / `print_disagreements` | Separation first, then AUC, then correlations, then caveats. A reader who stops after the first line still leaves with the right conclusion. |
-| `variance_report` | Within-prompt std and run-level spread per metric, plus `output_identical_rate`. Failed rows are excluded, so retry luck is not reported as model variance. Returns `None` on a single-sample frame rather than a fake zero. |
-| `find_unstable_prompts` | One row per prompt, ranked by score spread. An unstable prompt is usually unstable for a nameable reason — an ambiguous question, an answer on a scoring threshold, a genuine coin flip — and none of those are visible in an aggregate. |
-| `print_variance` | Output stability first, then run-level spread. Metrics that never moved collapse to one line so the interesting ones are not buried. |
+| Removed | Was | Why it went |
+| --- | --- | --- |
+| `--n-samples`, `row_key`, `sample_index` | Multi-sample variance: run-to-run error bars on the headline number | Triples cost and wall clock to answer a question a timed run cannot ask. Measured spread was ~0.001 on the hard set. |
+| `llm_eval/analysis.py`, `analysis/` | Meta-evaluation: separation, ROC-AUC, Spearman, Pearson, and disagreement rows grading the judge against ground truth | ~650 lines of statistics that would not be reached for under a clock, and too much to defend on a slide. The reasoning is retained above under "Design decisions". |
 
-`analysis/judge_agreement.py` is the standalone version: point it at any `*_scored.csv` and get the same report with no API calls, plus `--gt-col`, `--top`, and `--by-category`. All the arithmetic comes from the module, so there is one implementation.
-
-`variance_report`, `find_unstable_prompts`, `print_variance`, and `analysis/variance.py` are **dormant on this branch.** They need a `sample_index` column, which nothing produces now that `--n-samples` is cut, so `variance_report` returns `None` and `run_eval.py` skips the whole block. They are kept rather than deleted because the arithmetic is already written and tested; restoring the feature means restoring `--n-samples` from `main`. Note the asymmetry that motivated the cut: agreement can be recomputed from any finished labeled run, but variance cannot be recovered after the fact — the extra calls have to have been made at inference time.
+Both cuts follow the same rule: keep what gets used, not what was interesting to build. Code carried purely as decoration has to be justified on the spot, and that is a worse position than not having it.
 
 ## `run_eval.py` and `llm_eval/__init__.py`
 
@@ -277,27 +263,27 @@ Grades the judge, not the model. Only has anything to do when both scorers ran o
 | `--no-semantic` | off | Skips MiniLM. |
 | `--score-only` plus `--results` | required together | Skip inference. Rescore a previous raw CSV. |
 | `--resume` | off | Reuse rows from this run's checkpoints. Needs the same `--run-id`. |
-| `--output-dir` / `--run-id` | `results` / timestamp | Writes `run_id_raw.csv`, `run_id_scored.csv`, `run_id_metrics.json`, `run_id_disagreements.csv` when applicable, plus the `run_id_raw.csv.jsonl` and `run_id_judge.jsonl` checkpoints. |
+| `--output-dir` / `--run-id` | `results` / timestamp | Writes `run_id_raw.csv`, `run_id_scored.csv`, `run_id_metrics.json`, plus the `run_id_raw.csv.jsonl` and `run_id_judge.jsonl` checkpoints. |
 
-Judge-agreement has no flag. It runs whenever `expected` exists and `--judge` was passed, and lands in the terminal output and under `judge_agreement` in the metrics JSON.
+A labeled dataset run with `--judge` produces both score families on the same rows. Nothing compares them automatically any more — read `exact_match` against `contains_expected` and `judge_score` by eye, per the note under "Design decisions".
 
 `__init__.py` re-exports the public names: `HarnessConfig`, `batch_run`, `run_single`, the score functions, `JudgeConfig`, `judge_batch`, and the four rubrics. Import from `llm_eval` unless a private helper is needed.
 
 ## `tests/run_tests.py`
 
-One file, one command, 25 tests. This is the pre-flight check — run it before trusting the pipeline on the real task.
+One file, one command, 23 tests. This is the pre-flight check — run it before trusting the pipeline on the real task.
 
 ```bash
 python tests/run_tests.py            # everything, ~3.5 min, ~90 API calls
-python tests/run_tests.py --offline  # no network, ~9s
+python tests/run_tests.py --offline  # no network, ~11s
 python tests/run_tests.py -k resume  # only tests matching "resume"
 ```
 
-15 offline tests cover the pure functions: `extract_final_answer` last-match-wins, `classify_error` buckets, BLEU `max_order` capping, the empty-prediction guard, per-row ROUGE, failed-rows-are-`NaN`, JSON-serializable metrics, `Checkpoint` torn-line recovery, and `roc_auc` against values checkable by hand. 10 live tests shell out to `run_eval.py` for the integration paths: ground truth, judge plus agreement, open-ended, `--cot`, both resume paths, integer `prompt_id`s, judge resume, and `--score-only`.
+13 offline tests cover the pure functions: `extract_final_answer` last-match-wins, `classify_error` buckets, BLEU `max_order` capping, the empty-prediction guard, per-row ROUGE, failed-rows-are-`NaN`, JSON-serializable metrics, and `Checkpoint` torn-line recovery. 10 live tests shell out to `run_eval.py` for the integration paths: ground truth, both scorers on the same rows, open-ended, `--cot`, both resume paths, integer `prompt_id`s, judge resume, and `--score-only`.
 
 **The tests assert plumbing, not model quality.** No test claims the model scores 10/10 — that is a fact about `gpt-4o-mini` on a given afternoon, not about this code, and a suite that goes red because the model rephrased something is a suite you learn to ignore. The one exception is a *floor* of 80% on `--cot` format compliance, where a collapse to zero means `extract_final_answer` or the prompt wiring broke rather than the model got unlucky.
 
-Two tests exist only to guard the simplification: one asserts `--n-samples` is gone from all four places it lived (config field, `run_single` signature, `row_key`, CLI flag), the other asserts `--cot` survived. Removing a feature from three of four places leaves a confusing half-state, and merging `main` back would silently resurrect it.
+Three tests exist only to guard the simplification: `--n-samples` gone from all four places it lived (config field, `run_single` signature, `row_key`, CLI flag), the meta-evaluation layer gone from both `__init__.py` and `run_eval.py`, and `--cot` still present. Removing a feature from three of four places leaves a confusing half-state, and merging `main` back would silently resurrect it.
 
 Live tests declare their prerequisites through `ensure_run()`, which builds a shared run only if its artifacts are missing. A full pass reuses and pays nothing extra; any single test still works under `-k`. The first draft had the resume tests silently depending on an earlier test having run, which is the wrong thing to debug under a clock.
 

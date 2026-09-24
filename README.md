@@ -1,21 +1,19 @@
 # llm-eval-harness
 
-A small, readable harness for evaluating LLM outputs. Runs a dataset of prompts against any model, scores the results two independent ways — against ground-truth answers and with an LLM judge — then **grades the judge against the ground truth** so you know whether to trust it on data where no gold answer exists.
+A small, readable harness for evaluating LLM outputs. Runs a dataset of prompts against any model and scores the results two independent ways — against ground-truth answers, and with an LLM judge that reads the probability distribution over its own score token rather than just parsing a digit.
 
 Built to be understood end to end rather than to be comprehensive. Every metric is either a few lines you can read or a documented call into a standard library, and every non-obvious decision carries an inline comment explaining the failure mode it prevents.
 
 ```
 harness.py ──> DataFrame ──┬──> scoring.py   (exact match, token F1, BLEU/ROUGE, semantic)
   one row per call         └──> judge.py     (CoT rubric + logprob-weighted score)
-                                    │
-                                    └──> analysis.py  (does the judge agree with ground truth?)
 ```
 
 ## Why another one
 
-Most eval libraries ask you to express your task in their abstractions. This one is about 1,600 lines of plain Python over a pandas DataFrame — 4,000 counting the comments and docstrings, which is the intended ratio — so adapting it to an unusual task means editing a function rather than finding the right subclass. Three things it does that are easy to get wrong:
+Most eval libraries ask you to express your task in their abstractions. This one is about 1,500 lines of plain Python over a pandas DataFrame — 3,100 counting the comments and docstrings, which is the intended ratio — so adapting it to an unusual task means editing a function rather than finding the right subclass. Three things it does that are easy to get wrong:
 
-**The judge is measured, not assumed.** An LLM judge is used precisely where there is no gold answer, which is exactly where you cannot check it. The fix is to run both scorers on a *labeled* set and compare: separation, ROC-AUC, Spearman, and the individual rows where they most disagree. If the judge cannot track correctness where correctness is known, it will not do better where it is not.
+**You never pay for the same token twice.** Raw outputs are written before anything is scored, every row is checkpointed as it lands, and `--score-only` rescores a finished run offline. A scoring bug, a changed metric, or a crash at row 190 of 200 all cost zero API calls to recover from — which matters most on exactly the runs that are expensive enough to care about.
 
 **Failed calls are `NaN`, not `0`.** Scoring an errored row as zero blends "the model was wrong" with "the request never returned," so a rate-limit storm reads as a quality drop. Every mean here is "of the calls that succeeded," printed with its `n`, with `failure_rate` reported separately.
 
@@ -47,7 +45,7 @@ python run_eval.py --model google/gemini-2.5-flash
 # Ground truth only — dataset has an `expected` column
 python run_eval.py --dataset datasets/ground_truth_hard.json
 
-# Add the LLM judge, and grade it against the ground truth
+# Add the LLM judge — both score families land on the same rows
 python run_eval.py --dataset datasets/ground_truth_hard.json --judge
 
 # Open-ended data, no `expected` column — judge is the whole score
@@ -75,22 +73,17 @@ Each run writes `<run_id>_raw.csv` (before scoring, so a scoring bug never costs
 
 ```
 exact_match:
-  mean: 0.7500  (std: 0.4472, n=16)
-  range: [0.0000, 1.0000]  p25=0.7500  median=1.0000  p75=1.0000
-  distribution: 0.0:4  1.0:12
+  mean: 0.4375  (std: 0.5123, n=16)
+  range: [0.0000, 1.0000]  p25=0.0000  median=0.0000  p75=1.0000
+  distribution: 0.0:9  1.0:7
 
-JUDGE vs GROUND TRUTH AGREEMENT
-  contains_expected (binary: 14 correct / 2 incorrect)
-    mean judge score:  correct 4.86  |  incorrect 5.00  |  separation -0.14
-    ROC-AUC:           0.696   (0.5 = chance, 1.0 = perfect separation)
-    Spearman: +0.392     Pearson: -0.098
-
-  ! format mismatch: 7 rows contain the gold answer but do not equal it
-    (exact_match 0.44 vs contains_expected 0.88). exact_match is scoring output
-    format here, not correctness — prefer contains_expected as the reference.
+contains_expected:
+  mean: 0.8750  (std: 0.3416, n=16)
+  range: [0.0000, 1.0000]  p25=1.0000  median=1.0000  p75=1.0000
+  distribution: 0.0:2  1.0:14
 ```
 
-That last warning is the tool catching a mistake worth catching: a model answering every question correctly *in a sentence* scores near zero on exact match, which looks like a broken judge and is actually a mismatched metric.
+Those two lines together are worth more than either alone. A large gap between `exact_match` and `contains_expected` means the model is answering correctly but in a sentence, so exact match is measuring *output format* rather than correctness — the fix is `--cot` or a tighter prompt, not a different model. On this run the model was right far more often than 44%.
 
 Distributions print alongside every mean, because the two most common outcomes here are bimodal (exact match is really a pass rate) and saturated (a helpfulness judge giving everything a 5). Both look unremarkable as a mean and obvious as a histogram.
 
@@ -117,8 +110,8 @@ Timed and retried per request (60s default, exponential backoff with jitter), co
 ## Tests
 
 ```bash
-python tests/run_tests.py            # 25 tests, ~3.5 min (makes real API calls)
-python tests/run_tests.py --offline  # 15 tests, ~9s, no network
+python tests/run_tests.py            # 23 tests, ~3.5 min (makes real API calls)
+python tests/run_tests.py --offline  # 13 tests, ~11s, no network
 python tests/run_tests.py -k resume  # filter by name
 ```
 
@@ -144,14 +137,12 @@ llm_eval/
   harness.py    inference: retry, concurrency, checkpointing. Knows nothing about scoring.
   scoring.py    reference-based metrics. Never calls the API.
   judge.py      LLM-as-judge with logprob-weighted scoring.
-  analysis.py   meta-evaluation: grades the judge against ground truth.
 run_eval.py     CLI. The only place that orders the layers.
-analysis/       standalone scripts for re-analyzing a finished run, no API calls.
 tests/          one-command test suite.
 datasets/       demo datasets.
 ```
 
-The dependency direction is one-way: `judge.py` imports the retry policy and checkpoint from `harness.py`, `analysis.py` sits above both scorers, and nothing imports back down into the inference layer. Inference bugs and metric bugs fail in different places.
+The dependency direction is one-way: `judge.py` imports the retry policy and checkpoint from `harness.py`, and nothing imports back down into the inference layer. Inference bugs and metric bugs fail in different places.
 
 [`FRAMEWORK.md`](FRAMEWORK.md) is the deep version — architecture, execution order, and the reasoning behind each decision, including the ones that turned out to be wrong.
 

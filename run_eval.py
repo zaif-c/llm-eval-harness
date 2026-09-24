@@ -70,16 +70,9 @@ from llm_eval import (
     RUBRIC_SAFETY,
     batch_run,
     compute_metrics,
-    find_disagreements,
-    find_unstable_prompts,
-    judge_agreement,
     judge_batch,
-    print_agreement,
-    print_disagreements,
     print_metrics,
-    print_variance,
     score_all,
-    variance_report,
 )
 
 # Maps the --judge-rubric flag value to the Rubric object. The dict is also the
@@ -342,25 +335,6 @@ def main():
     # depend on scoring, so report them even for an unscored run.
     metrics = compute_metrics(df)
 
-    # Meta-evaluation: only possible when both scorers ran on the same rows.
-    # Computed before the JSON is written so the agreement report ships inside
-    # the metrics file rather than existing only as terminal output.
-    # No flag guards this — when both scorers have already run, the comparison
-    # is free, and it is the single most useful output of the whole pipeline to
-    # have by default rather than behind a flag someone forgets.
-    agreement = None
-    if ran_ground_truth and args.judge:
-        agreement = judge_agreement(df)
-        if agreement:
-            metrics["judge_agreement"] = agreement
-
-    # Variance no-ops on this branch: --n-samples was cut, so frames have no
-    # sample_index column and variance_report returns None. Left in place until
-    # the analysis module is reviewed.
-    variance = variance_report(df)
-    if variance:
-        metrics["variance"] = variance
-
     print_metrics(metrics)
 
     # No numpy conversion step here: compute_metrics returns plain Python types
@@ -369,31 +343,6 @@ def main():
     with open(metrics_path, "w") as f:
         json.dump(metrics, f, indent=2)
     print(f"Metrics saved to: {metrics_path}")
-
-    if variance:
-        print_variance(variance)
-        # The specific prompts that moved. An aggregate spread says the run is
-        # unstable; this says which questions to go read.
-        score_col = "exact_match" if "exact_match" in df.columns else "judge_score"
-        unstable = find_unstable_prompts(df, score_col=score_col)
-        if not unstable.empty:
-            print(f"{'-'*50}")
-            print(f"LEAST STABLE PROMPTS (by {score_col} spread)")
-            print(f"{'-'*50}")
-            print(unstable.to_string(index=False))
-            print()
-
-    if agreement:
-        print_agreement(agreement)
-        # The individual conflicting rows, printed for immediate reading and
-        # written out in full because the printed table truncates long text and
-        # these rows are the ones worth reading verbatim.
-        disagreements = find_disagreements(df)
-        if not disagreements.empty:
-            print_disagreements(disagreements)
-            disagreements_path = output_dir / f"{run_id}_disagreements.csv"
-            disagreements.to_csv(disagreements_path, index=False)
-            print(f"Disagreements saved to: {disagreements_path}")
 
     # =========================================================================
     # STEP 5: per-category breakdown, when the dataset provides categories

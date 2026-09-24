@@ -371,74 +371,25 @@ def t_checkpoint():
     assert noop.load() == []
 
 
-@test("analysis: roc_auc matches known values")
-def t_roc_auc():
-    """Hand-rolled AUC via the Mann-Whitney identity.
+@test("cut: meta-evaluation layer is fully removed")
+def t_analysis_gone():
+    """The analysis layer was cut; this guards against a partial revert.
 
-    Checked against cases with an answer by inspection: perfect separation,
-    perfect inversion, and an all-tied input where every pair contributes 0.5.
-    Single-class input returns None rather than a misleading number.
+    Importing a name that no longer exists fails only at import time, so a
+    stale re-export in __init__.py or a stale import in run_eval.py would break
+    the CLI rather than anything here. Both are checked.
     """
-    from llm_eval import roc_auc
-    assert approx(roc_auc([1, 2, 3, 4], [0, 0, 1, 1]), 1.0)
-    assert approx(roc_auc([4, 3, 2, 1], [0, 0, 1, 1]), 0.0)
-    assert approx(roc_auc([1, 1, 1, 1], [0, 0, 1, 1]), 0.5)  # midranks
-    assert roc_auc([1, 2, 3], [1, 1, 1]) is None, "single class -> None"
-
-
-@test("analysis: agreement + disagreements on a synthetic frame")
-def t_agreement():
-    """The meta-evaluation layer, exercised without paying for a judge run.
-
-    The frame is built so the judge tracks exact_match perfectly, which should
-    give separation > 0 and AUC 1.0. find_disagreements must then return the
-    one row that was planted to conflict.
-    """
-    import pandas as pd
-    from llm_eval import judge_agreement, find_disagreements
-
-    df = pd.DataFrame({
-        "prompt_id":   [f"q{i}" for i in range(6)],
-        "input":       ["q"] * 6,
-        "output":      ["a"] * 6,
-        "expected":    ["a"] * 6,
-        "exact_match": [1, 1, 1, 0, 0, 0],
-        "judge_score": [5.0, 5.0, 4.0, 2.0, 1.0, 5.0],  # last row conflicts
-    })
-    rep = judge_agreement(df, gt_cols=("exact_match",))
-    assert rep is not None
-    # Per-metric stats are nested under "comparisons"; the top level holds
-    # judge_col, n, and the warnings list.
-    em = rep["comparisons"]["exact_match"]
-    assert em["n_correct"] == 3 and em["n_incorrect"] == 3
-    # Correct rows average 5,5,4 and incorrect 2,1,5 -> separation exactly 2.0.
-    assert approx(em["separation"], 2.0, tol=1e-3), em["separation"]
-    assert em["separation"] > 0, "judge should track correctness here"
-    # One of the three incorrect rows outranks a correct one, so AUC is 7/9.
-    assert approx(em["auc"], 7 / 9, tol=1e-3), em["auc"]
-    # Small-n always warns; that guardrail should not silently disappear.
-    assert any("small" in w for w in rep["warnings"])
-
-    dis = find_disagreements(df, gt_col="exact_match", top_n=3)
-    assert not dis.empty
-    # The planted row: exact_match 0 but judge gave a 5, so it must rank first
-    # and be labelled as the judge being generous.
-    assert dis.iloc[0]["prompt_id"] == "q5", dis[["prompt_id", "gap"]].to_dict("records")
-    assert dis.iloc[0]["direction"] == "judge_generous"
-    assert approx(dis.iloc[0]["gap"], 1.0, tol=1e-3)
-
-
-@test("analysis: variance no-ops without sample_index")
-def t_variance_noop():
-    """--n-samples was cut, so no frame has sample_index any more.
-
-    variance_report must return None rather than raising, since run_eval.py
-    still calls it unconditionally.
-    """
-    import pandas as pd
-    from llm_eval import variance_report
-    df = pd.DataFrame({"prompt_id": ["a", "b"], "exact_match": [1, 0]})
-    assert variance_report(df) is None
+    import llm_eval
+    for name in ("judge_agreement", "find_disagreements", "variance_report",
+                 "roc_auc", "print_agreement", "print_variance"):
+        assert not hasattr(llm_eval, name), f"{name} should be gone"
+    try:
+        import llm_eval.analysis  # noqa: F401
+        raise AssertionError("llm_eval.analysis should not be importable")
+    except ImportError:
+        pass
+    # run_eval.py must still import cleanly with those names removed.
+    cli("--help")
 
 
 # =============================================================================
@@ -463,26 +414,28 @@ def t_live_ground_truth():
     assert (TMP / "live_gt_metrics.json").exists()
 
 
-@test("live: judge + agreement on the hard set", live=True)
-def t_live_judge_agreement():
-    """The hard set produces both correct and incorrect rows, which is what
-    makes agreement measurable at all. The easy demo set is answered 10/10 and
-    gives ground truth zero variance.
+@test("live: both scorers on the same rows", live=True)
+def t_live_judge_and_ground_truth():
+    """A labeled dataset with --judge runs ground truth *and* the judge, so
+    every row carries both a reference-based score and a rubric score.
 
-    Also covers the judge writing a disagreements CSV.
+    The hard set is used rather than the easy demo set because it produces both
+    correct and incorrect rows, which is what makes the two columns worth
+    comparing by eye now that the automated comparison is gone.
     """
     import pandas as pd
     judge_run()
     scored = pd.read_csv(TMP / "live_judge_scored.csv")
     assert len(scored) == 16
-    assert "judge_score" in scored.columns
+    for col in ("exact_match", "contains_expected", "judge_score"):
+        assert col in scored.columns, f"missing {col}"
     assert scored["judge_score"].notna().any(), "judge produced no scores at all"
 
     metrics = json.loads((TMP / "live_judge_metrics.json").read_text())
-    assert "judge_agreement" in metrics, "agreement should run automatically"
-    assert "variance" not in metrics, "variance should never appear now"
-    # The disagreement rows are the artifact worth reading by hand.
-    assert (TMP / "live_judge_disagreements.csv").exists()
+    assert "judge_score" in metrics, "judge scores should be summarized"
+    # Both layers were removed; neither key should ever reappear.
+    assert "judge_agreement" not in metrics
+    assert "variance" not in metrics
 
 
 @test("live: judge with no ground truth", live=True)
