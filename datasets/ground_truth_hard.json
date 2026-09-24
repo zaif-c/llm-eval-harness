@@ -1,0 +1,98 @@
+[
+  {
+    "prompt_id": "hard_math_1",
+    "input": "What is 17 * 23? Answer with just the number.",
+    "expected": "391",
+    "category": "arithmetic"
+  },
+  {
+    "prompt_id": "hard_math_2",
+    "input": "What is 2^10? Answer with just the number.",
+    "expected": "1024",
+    "category": "arithmetic"
+  },
+  {
+    "prompt_id": "hard_math_3",
+    "input": "A train travels 120 km in 1.5 hours. What is its average speed in km/h?",
+    "expected": "80",
+    "category": "arithmetic"
+  },
+  {
+    "prompt_id": "hard_math_4",
+    "input": "What is the derivative of x^3 with respect to x?",
+    "expected": "3x^2",
+    "category": "arithmetic"
+  },
+  {
+    "prompt_id": "hard_sci_1",
+    "input": "What is the chemical symbol for tungsten? Answer with just the symbol.",
+    "expected": "W",
+    "category": "science"
+  },
+  {
+    "prompt_id": "hard_sci_2",
+    "input": "How many bones are in the adult human body?",
+    "expected": "206",
+    "category": "science"
+  },
+  {
+    "prompt_id": "hard_sci_3",
+    "input": "What is the atomic number of gold? Answer with just the number.",
+    "expected": "79",
+    "category": "science"
+  },
+  {
+    "prompt_id": "hard_sci_4",
+    "input": "Explain why the sky appears blue during the day.",
+    "expected": "Rayleigh scattering",
+    "category": "science"
+  },
+  {
+    "prompt_id": "hard_hist_1",
+    "input": "In what year was the Peace of Westphalia signed? Answer with just the year.",
+    "expected": "1648",
+    "category": "history"
+  },
+  {
+    "prompt_id": "hard_hist_2",
+    "input": "Who was the 13th President of the United States?",
+    "expected": "Millard Fillmore",
+    "category": "history"
+  },
+  {
+    "prompt_id": "hard_geo_1",
+    "input": "What is the capital of Kazakhstan? Answer with just the city name.",
+    "expected": "Astana",
+    "category": "geography"
+  },
+  {
+    "prompt_id": "hard_geo_2",
+    "input": "What is the longest river in Asia?",
+    "expected": "Yangtze",
+    "category": "geography"
+  },
+  {
+    "prompt_id": "hard_geo_3",
+    "input": "Which country has the most time zones?",
+    "expected": "France",
+    "category": "geography"
+  },
+  {
+    "prompt_id": "hard_lit_1",
+    "input": "Who wrote 'One Hundred Years of Solitude'?",
+    "expected": "Gabriel Garcia Marquez",
+    "category": "literature"
+  },
+  {
+    "prompt_id": "hard_lit_2",
+    "input": "In which novel does the character Raskolnikov appear? Answer with just the title.",
+    "expected": "Crime and Punishment",
+    "category": "literature"
+  },
+  {
+    "prompt_id": "hard_lit_3",
+    "input": "Summarize the central theme of George Orwell's 'Animal Farm' in one sentence.",
+    "expected": "Revolutionary ideals are corrupted by those who seize power",
+    "category": "literature"
+  }
+]

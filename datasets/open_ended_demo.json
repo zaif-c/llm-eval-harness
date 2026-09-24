@@ -1,0 +1,27 @@
+[
+  {
+    "prompt_id": "explain_1",
+    "input": "Explain photosynthesis to a 10-year-old in 3 to 5 sentences.",
+    "category": "explanation"
+  },
+  {
+    "prompt_id": "explain_2",
+    "input": "Why is the sky blue? Answer in one short paragraph a non-scientist can follow.",
+    "category": "explanation"
+  },
+  {
+    "prompt_id": "advice_1",
+    "input": "I have a 30-minute technical interview tomorrow and I have not prepared. What should I do tonight?",
+    "category": "advice"
+  },
+  {
+    "prompt_id": "opinion_1",
+    "input": "What is the best programming language? Defend the answer briefly and name one case where a different language is the better choice.",
+    "category": "opinion"
+  },
+  {
+    "prompt_id": "summary_1",
+    "input": "Summarize the difference between precision and recall in two sentences, using a concrete example.",
+    "category": "summary"
+  }
+]
