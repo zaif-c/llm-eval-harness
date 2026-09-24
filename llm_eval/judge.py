@@ -68,7 +68,13 @@ from openai import BadRequestError, OpenAI
 
 # Imported from the harness rather than reimplemented. One retry policy and one
 # checkpoint implementation across the repo; see the note in harness.py.
-from llm_eval.harness import Checkpoint, call_with_retry, make_client, message_text
+from llm_eval.harness import (
+    Checkpoint,
+    call_with_retry,
+    ensure_unique_prompt_ids,
+    make_client,
+    message_text,
+)
 
 load_dotenv()
 
@@ -621,6 +627,11 @@ def judge_batch(
         DataFrame with added columns: judge_score, judge_raw_score,
                                       judge_reasoning, score_method, judge_error
     """
+    # Checked here as well as in batch_run, not only there: --score-only loads a
+    # CSV straight into this function without inference ever running.
+    if "prompt_id" in df.columns:
+        ensure_unique_prompt_ids(df["prompt_id"])
+
     client = make_client()
     df = df.copy()  # never mutate the caller's frame
 

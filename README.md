@@ -61,7 +61,7 @@ python run_eval.py --score-only --results results/<run_id>_raw.csv
 python run_eval.py --dataset data.json --run-id myrun --resume
 ```
 
-A dataset is JSON or CSV. Records need `prompt_id` and `input`; add `expected` for ground-truth scoring and `category` for a per-category breakdown. Any other column rides along onto the output.
+A dataset is JSON or CSV. Records need a **unique** `prompt_id` and an `input`; add `expected` for ground-truth scoring and `category` for a per-category breakdown. Any other column rides along onto the output. Duplicate ids are rejected before any call is made, because results are keyed by id and a repeat would silently give two rows the same result.
 
 ```json
 [{"prompt_id": "q1", "input": "What is the capital of France?", "expected": "Paris", "category": "geography"}]

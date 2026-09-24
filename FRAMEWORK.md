@@ -139,7 +139,9 @@ The judge has a circularity problem. It is used precisely where there is no gold
 
 Related, and worth keeping in mind whenever two scorers disagree: a disagreement says one of them is wrong and does not say which. A judge scoring higher than the ground-truth metric means *either* the judge over-credited a wrong answer *or* the metric is too strict for that answer format. Only reading the row settles it.
 
-**Row identity is `prompt_id`.** One prompt produces one row. Resume maps and result maps in `batch_run` and `judge_batch` key on `str(prompt_id)` so an int id in the source JSON still matches the same id written as a string in the checkpoint.
+**Row identity is `prompt_id`, and uniqueness is enforced rather than assumed.** One prompt produces one row. Resume maps and result maps in `batch_run` and `judge_batch` key on `str(prompt_id)` so an int id in the source JSON still matches the same id written as a string in the checkpoint.
+
+That keying has a consequence worth a guard: a repeated id *overwrites* in the result dict instead of colliding, so two rows would come back sharing one result. The frame keeps its row count and its shape, nothing raises, and the numbers are wrong — the same silent-plausible failure class as the out-of-order-append bug the keying exists to prevent. `ensure_unique_prompt_ids` runs at the top of `batch_run`, before `make_client`, and again in `judge_batch` because `--score-only` reaches the judge without inference ever running. It compares as `str()` for the same reason the maps are keyed that way, so an int `1` and a string `"1"` are caught as the duplicate they would become. It rejects rather than de-duplicating or renaming: a repeated id is a dataset bug, and silently keeping one of the two rows would be the same quiet wrongness in a different place.
 
 **Measured result: temperature 0 is not deterministic.** On the 16-question hard set, 5 of 16 prompts (31%) returned different text across three samples. The differences were purely stylistic — *"following the death of President Zachary Taylor"* versus *"assuming the presidency after the death of Zachary Taylor"* — so `exact_match` and `contains_expected` were perfectly stable and the graded metrics moved by about 0.001. The defensible statement is therefore "not deterministic, but stable to three decimal places on this set", which is a stronger claim than either "it is deterministic" or "it varies". A control run at temperature 1.0 confirmed the tool is measuring and not just reporting zeros: text variation doubled to 63% of prompts and score spread roughly tripled. Multi-sample variance was measured during prep, then dropped from this branch — a 90-minute interview does not have time for 3× the calls.
 
@@ -271,15 +273,16 @@ A labeled dataset run with `--judge` produces both score families on the same ro
 
 ## `tests/run_tests.py`
 
-One file, one command, 23 tests. This is the pre-flight check — run it before trusting the pipeline on the real task.
+One file, one command, 24 tests. This is the pre-flight check — run it before trusting the pipeline on the real task.
 
 ```bash
 python tests/run_tests.py            # everything, ~3.5 min, ~90 API calls
+                                     # 24 tests: 14 offline, 10 live
 python tests/run_tests.py --offline  # no network, ~11s
 python tests/run_tests.py -k resume  # only tests matching "resume"
 ```
 
-13 offline tests cover the pure functions: `extract_final_answer` last-match-wins, `classify_error` buckets, BLEU `max_order` capping, the empty-prediction guard, per-row ROUGE, failed-rows-are-`NaN`, JSON-serializable metrics, and `Checkpoint` torn-line recovery. 10 live tests shell out to `run_eval.py` for the integration paths: ground truth, both scorers on the same rows, open-ended, `--cot`, both resume paths, integer `prompt_id`s, judge resume, and `--score-only`.
+14 offline tests cover the pure functions: `extract_final_answer` last-match-wins, `classify_error` buckets, BLEU `max_order` capping, the empty-prediction guard, per-row ROUGE, failed-rows-are-`NaN`, JSON-serializable metrics, `Checkpoint` torn-line recovery, and the duplicate-`prompt_id` guard. 10 live tests shell out to `run_eval.py` for the integration paths: ground truth, both scorers on the same rows, open-ended, `--cot`, both resume paths, integer `prompt_id`s, judge resume, and `--score-only`.
 
 **The tests assert plumbing, not model quality.** No test claims the model scores 10/10 — that is a fact about `gpt-4o-mini` on a given afternoon, not about this code, and a suite that goes red because the model rephrased something is a suite you learn to ignore. The one exception is a *floor* of 80% on `--cot` format compliance, where a collapse to zero means `extract_final_answer` or the prompt wiring broke rather than the model got unlucky.
 

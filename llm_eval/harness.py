@@ -92,6 +92,7 @@ def make_client() -> OpenAI:
     """
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
+        # Fail here instead of later to avoid silent failures.
         raise ValueError("OPENROUTER_API_KEY is not set")
     return OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
 
@@ -401,6 +402,40 @@ def classify_error(error: Optional[str]) -> Optional[str]:
     return "other"
 
 
+def ensure_unique_prompt_ids(prompt_ids) -> None:
+    """Raise if any prompt_id repeats. Called before any call is paid for.
+
+    Both batch_run and judge_batch file results into a dict keyed by
+    str(prompt_id). A duplicate id therefore overwrites rather than collides:
+    two rows end up sharing one result. Nothing raises, the frame keeps its
+    shape and its row count, and the scores are wrong — which is what makes it
+    worth a guard rather than a comment.
+
+    Compared as str() for the same reason the result dicts are keyed that way:
+    an int 1 and a string "1" are the same key downstream, so they are the same
+    duplicate here.
+
+    Rejects rather than de-duplicating or renaming. A dataset with repeated ids
+    is a dataset bug, and silently picking one of the two rows would be the same
+    class of quiet wrongness this exists to prevent.
+    """
+    seen: set[str] = set()
+    dupes: list[str] = []
+    for prompt_id in prompt_ids:
+        key = str(prompt_id)
+        if key in seen and key not in dupes:
+            dupes.append(key)
+        seen.add(key)
+    if dupes:
+        shown = ", ".join(dupes[:5])
+        more = f" (+{len(dupes) - 5} more)" if len(dupes) > 5 else ""
+        raise ValueError(
+            f"Duplicate prompt_id values: {shown}{more}. "
+            "Ids must be unique: results are keyed by prompt_id, so duplicates "
+            "would silently share one result row."
+        )
+
+
 def backoff_delay(
     attempt: int,
     base_delay: float = 1.0,
@@ -708,6 +743,11 @@ def batch_run(
         4. reassemble everything in dataset order
         5. shape the DataFrame, print the summary, write the CSV
     """
+    # Checked first because it is free and because the failure it prevents is
+    # invisible: duplicate ids would produce a full-size frame with duplicated
+    # results rather than an error.
+    ensure_unique_prompt_ids(p["prompt_id"] for p in prompts)
+
     # One client for the whole batch, shared across threads. The OpenAI SDK
     # client is thread-safe and holds a connection pool, so reusing it is both
     # correct and faster than constructing one per call.
