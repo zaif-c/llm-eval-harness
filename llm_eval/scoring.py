@@ -738,7 +738,16 @@ def score_histogram(values: pd.Series, bins: int = 5) -> dict:
     # `bins + 1` rather than `bins` so a full 1-5 integer judge scale (five
     # distinct values) still gets the per-value treatment.
     if len(distinct) <= bins + 1:
-        return {str(round(float(v), 4)): int((values == v).sum()) for v in distinct}
+        # Counts are accumulated per rounded key, not assigned. Two distinct
+        # values can round to the same label — logprob-weighted judge scores
+        # arrive as 4.999999999 and 5.0, which are both "5.0" at 4dp — and
+        # assigning would let the second silently replace the first, dropping
+        # rows from a distribution that is supposed to account for all of them.
+        out: dict[str, int] = {}
+        for v in distinct:
+            key = str(round(float(v), 4))
+            out[key] = out.get(key, 0) + int((values == v).sum())
+        return out
 
     lo, hi = float(values.min()), float(values.max())
     # All values identical but numerous: the edge arithmetic below would produce

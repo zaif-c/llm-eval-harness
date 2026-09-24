@@ -67,6 +67,7 @@ from llm_eval import (
     RUBRIC_ACCURACY,
     RUBRIC_COHERENCE,
     RUBRIC_HELPFULNESS,
+    RUBRIC_MATH_REASONING,
     RUBRIC_SAFETY,
     batch_run,
     compute_metrics,
@@ -83,6 +84,9 @@ RUBRICS = {
     "accuracy": RUBRIC_ACCURACY,
     "coherence": RUBRIC_COHERENCE,
     "safety": RUBRIC_SAFETY,
+    # Expects --judge-output-col cot_reasoning and a worked solution as the
+    # reference; see the note above the rubric in judge.py.
+    "math_reasoning": RUBRIC_MATH_REASONING,
 }
 
 
@@ -204,6 +208,25 @@ def main():
         action="store_true",
         help="Judge from the parsed SCORE line only, skipping the probability-weighted score.",
     )
+    # These two default to the historical behavior (judge the whole output
+    # against the gold short answer) and exist for the case it does not fit:
+    # a diagnostic run that wants the answer and the reasoning scored by
+    # different graders, against different references.
+    parser.add_argument(
+        "--judge-output-col",
+        type=str,
+        default="output",
+        help="Column the judge reads as the response. Use 'cot_reasoning' with --cot to "
+             "grade the reasoning alone, leaving the final answer to the ground-truth metrics.",
+    )
+    parser.add_argument(
+        "--judge-reference-col",
+        type=str,
+        default=None,
+        help="Column passed to the judge as the reference (default: 'expected' when the "
+             "dataset is labeled). Point this at a worked solution to grade reasoning "
+             "against reasoning. Pass 'none' to withhold the reference entirely.",
+    )
 
     # ---- Output options -----------------------------------------------------
     parser.add_argument("--output-dir", type=str, default="results", help="Output directory")
@@ -317,9 +340,40 @@ def main():
         )
         # Hand the judge the gold answer when there is one. This is the
         # reference-assisted mode; on open-ended data it stays None and the
-        # judge grades on the rubric alone.
-        reference_col = "expected" if ran_ground_truth else None
-        df = judge_batch(df, judge_config, reference_col=reference_col)
+        # judge grades on the rubric alone. --judge-reference-col overrides the
+        # choice of column, and the literal "none" withholds it.
+        if args.judge_reference_col:
+            reference_col = (
+                None if args.judge_reference_col.lower() == "none"
+                else args.judge_reference_col
+            )
+        else:
+            reference_col = "expected" if ran_ground_truth else None
+
+        # Validated against the frame rather than assumed. A misnamed column
+        # would otherwise read as an empty string on every row, and the judge
+        # would return a full set of confident scores for a response it never
+        # saw. This check lands after inference, but the raw CSV is already on
+        # disk by now, so the recovery is --score-only rather than paying again.
+        missing = []
+        if args.judge_output_col not in df.columns:
+            missing.append(f"--judge-output-col '{args.judge_output_col}'")
+        if reference_col and reference_col not in df.columns:
+            missing.append(f"--judge-reference-col '{reference_col}'")
+        if missing:
+            raise SystemExit(
+                f"Column not found for {' and '.join(missing)}. "
+                f"Available columns: {', '.join(df.columns)}"
+            )
+
+        print(f"Judging column: {args.judge_output_col}")
+        print(f"Reference column: {reference_col or '(none)'}")
+        df = judge_batch(
+            df,
+            judge_config,
+            output_col=args.judge_output_col,
+            reference_col=reference_col,
+        )
 
     # =========================================================================
     # STEP 4: persist and report

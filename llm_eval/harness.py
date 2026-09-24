@@ -181,18 +181,23 @@ def message_text(message) -> Optional[str]:
     return message_reasoning(message)
 
 
+# Compiled once and shared by extract_final_answer and extract_reasoning, so the
+# two can never disagree about where the answer line begins.
+#
+# Regex flags:
+#   (?i) case-insensitive, so "Answer:" and "ANSWER:" both match.
+#   (?m) multiline, so ^ anchors to the start of each line rather than the
+#        start of the string. This is what makes "a line beginning with
+#        ANSWER:" expressible at all.
+#   [ \t]* allows the model to indent the line without breaking the match.
+ANSWER_LINE_RE = re.compile(r"(?im)^[ \t]*ANSWER:[ \t]*(.+)$")
+
+
 def extract_final_answer(text: Optional[str]) -> tuple[Optional[str], bool]:
     """Pull the last ANSWER: line out of a chain-of-thought response.
 
     Returns (answer, extracted). extracted is False when the model did not
     follow the format; the caller then scores the full output.
-
-    Regex flags:
-      (?i) case-insensitive, so "Answer:" and "ANSWER:" both match.
-      (?m) multiline, so ^ anchors to the start of each line rather than the
-           start of the string. This is what makes "a line beginning with
-           ANSWER:" expressible at all.
-      [ \\t]* allows the model to indent the line without breaking the match.
 
     The last match wins, not the first, because a model asked to reason will
     often mention the format mid-reasoning ("...so the ANSWER: should be the
@@ -206,10 +211,35 @@ def extract_final_answer(text: Optional[str]) -> tuple[Optional[str], bool]:
     """
     if not text:
         return None, False
-    matches = re.findall(r"(?im)^[ \t]*ANSWER:[ \t]*(.+)$", text)
+    matches = ANSWER_LINE_RE.findall(text)
     if not matches:
         return text, False
     return matches[-1].strip(), True
+
+
+def extract_reasoning(text: Optional[str]) -> Optional[str]:
+    """Everything written *before* the final ANSWER: line.
+
+    The complement of extract_final_answer, and the other half of the split that
+    lets one response be graded twice by two different graders: scoring.py
+    checks the answer, the judge reads the reasoning.
+
+    Keeping them apart is the point. A judge shown the final answer drifts
+    toward grading whether that answer is right — which exact_match already
+    measures — instead of grading the work, so the second score stops being
+    independent of the first.
+
+    Returns "" when the model wrote the sentinel and nothing before it (an
+    answer with no work shown), which is a real and distinct outcome from a
+    failed call; those keep `None`. When the sentinel is absent there is no
+    boundary to split on, so the whole response is the reasoning.
+    """
+    if not text:
+        return None
+    matches = list(ANSWER_LINE_RE.finditer(text))
+    if not matches:
+        return text.strip()
+    return text[:matches[-1].start()].strip()
 
 
 def token_usage(response) -> dict:
@@ -620,6 +650,9 @@ def run_single(
             answer, extracted = extract_final_answer(output)
             row["answer"] = answer
             row["answer_extracted"] = int(extracted)
+            # The reasoning half of the same split. Stored separately from
+            # `output` so a judge can be pointed at the work alone.
+            row["cot_reasoning"] = extract_reasoning(output)
         return row
 
     # ---- Failure path: all retries exhausted --------------------------------
@@ -646,6 +679,7 @@ def run_single(
     if config.chain_of_thought:
         row["answer"] = None
         row["answer_extracted"] = 0
+        row["cot_reasoning"] = None
     return row
 
 
@@ -853,12 +887,14 @@ def batch_run(
     # at a glance during a timed run: identity, then answer, then diagnostics,
     # then the dataset's own columns (expected, category) at the end.
     standard_cols = [
-        "prompt_id", "input", "output", "answer", "answer_extracted", "reasoning",
+        "prompt_id", "input", "output", "answer", "answer_extracted",
+        "cot_reasoning", "reasoning",
         "finish_reason", "truncated", "prompt_tokens", "completion_tokens",
         "total_tokens", "latency_ms", "timestamp", "model", "error", "error_type",
     ]
-    # Filtered against the actual columns, since "answer"/"answer_extracted"
-    # only exist on CoT runs and indexing on a missing column would raise.
+    # Filtered against the actual columns, since "answer"/"answer_extracted"/
+    # "cot_reasoning" only exist on CoT runs and indexing on a missing column
+    # would raise.
     standard_cols = [c for c in standard_cols if c in df.columns]
     extra_cols = [c for c in df.columns if c not in standard_cols]
     df = df[standard_cols + extra_cols]

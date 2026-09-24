@@ -604,6 +604,28 @@ def judge_single(
 # rather than building a new one.
 # =============================================================================
 
+def _cell_text(value) -> str:
+    """A DataFrame cell as text, with nulls becoming "" rather than "nan".
+
+    Plain str() is not safe here. A failed inference row carries None, which a
+    CSV round-trip turns into a float NaN, and str(NaN) is the four-character
+    string "nan" — which would be sent to the judge as if the model had said it,
+    and come back with a real score attached to nothing.
+    """
+    if value is None:
+        return ""
+    # pd.isna covers float NaN, pd.NA, and NaT in one check, which matters
+    # because which of those a null becomes depends on the column's dtype after
+    # a CSV round-trip. bool() guards the array-valued case, where pd.isna
+    # returns an array and truth-testing it raises.
+    try:
+        if bool(pd.isna(value)):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value)
+
+
 def judge_batch(
     df: pd.DataFrame,
     config: JudgeConfig,
@@ -675,21 +697,34 @@ def judge_batch(
 
     def judge_one(index: int, row: dict) -> dict:
         """One judgment, as executed by a worker thread."""
-        # str() coercion because a CSV round-trip can turn any of these into
+        # Null-safe coercion because a CSV round-trip can turn any of these into
         # non-string types (a numeric answer becomes a float, an empty cell
         # becomes NaN), and the prompt builder needs text.
-        question = str(row.get(input_col, ""))
-        response = str(row.get(output_col, ""))
+        question = _cell_text(row.get(input_col, ""))
+        response = _cell_text(row.get(output_col, ""))
         # Reference is None unless the caller explicitly named a column AND that
-        # column exists on this row. None means build_judge_prompt omits the
-        # whole Reference Answer section.
-        reference = (
-            str(row.get(reference_col, ""))
-            if reference_col and reference_col in row
-            else None
-        )
+        # column holds something. None means build_judge_prompt omits the whole
+        # Reference Answer section.
+        reference = _cell_text(row.get(reference_col, "")) if reference_col else ""
+        reference = reference or None
         prompt_id = row.get("prompt_id", index)
-        result = judge_single(client, question, response, config, reference, label=str(prompt_id))
+
+        if not response.strip():
+            # Nothing to grade: the inference call failed, or the model wrote an
+            # answer with no work in front of it. Scored as null rather than as
+            # the minimum, for the same reason score_all blanks failed rows
+            # instead of zeroing them — a missing response and a bad response
+            # are different findings and averaging them together hides both.
+            # Short-circuited before the API call, since the result is known.
+            result = {
+                "judge_score": None,
+                "judge_raw_score": None,
+                "judge_reasoning": None,
+                "score_method": None,
+                "judge_error": "empty response: nothing to judge",
+            }
+        else:
+            result = judge_single(client, question, response, config, reference, label=str(prompt_id))
         # prompt_id is stored alongside the judgment so a resumed run can match
         # it back to the right row. judge_single knows neither the id nor the
         # checkpoint, so they are merged in here rather than there.
@@ -799,6 +834,64 @@ Consider:
 - Does it maintain appropriate boundaries?""",
     scale_min=1,
     scale_max=5,
+)
+
+# Unlike the four above, this rubric is written to be paired with a reference:
+# the dataset's worked solution, passed through as the Reference Answer section.
+# It grades the *work*, which is only a separate measurement from correctness if
+# the judge is told not to grade the final answer — hence the explicit
+# instruction, and hence `cot_reasoning` rather than `output` as the column to
+# judge. Without both, this score collapses into a noisier copy of exact_match.
+#
+# The per-level anchors are deliberate too. The generic rubrics above define
+# only the endpoints, and the observed failure mode of that design is
+# saturation: a judge with no description of a 3 or a 4 gives nearly everything
+# a 5, and a column with no spread cannot discriminate no matter how well it
+# correlates. Naming what each level looks like is what buys partial credit.
+RUBRIC_MATH_REASONING = Rubric(
+    criteria="""Evaluate the quality of the mathematical reasoning in the response.
+
+The Reference Answer section contains the official worked solution. Treat it as
+the authority on the correct method and the correct intermediate quantities, but
+not as the only acceptable route: a different yet valid method is fully correct.
+
+Grade the REASONING, not the final answer. Whether the final number is right is
+measured separately by an exact-match check. Judge only whether the work shown
+actually establishes an answer.
+
+Consider:
+- Setup: does it identify the right quantities and relationships in the problem?
+- Method: is the solution path valid for the question asked?
+- Execution: is each arithmetic step performed correctly?
+- Justification: does each step follow from the previous ones, with no
+  unsupported leaps, guessed values, or results asserted without work?
+- Consistency: does it avoid contradicting itself, and avoid abandoning a
+  derived result in favour of a guess?
+
+Score guide:
+5 = Sound method, every step correct and justified. The work alone establishes
+    the answer.
+4 = Sound method with one minor blemish: a single arithmetic slip, or an
+    obvious step left implicit. The approach itself is right.
+3 = Partially correct. The right idea for part of the problem, but a real error
+    in method, or a step that does not follow from what came before.
+2 = Largely invalid. Misreads the problem, or the setup is wrong, or the work is
+    mostly guesswork with only incidental correct arithmetic.
+1 = No usable reasoning. No work shown, incoherent work, or a number asserted
+    with no support.
+
+Award partial credit honestly. Reasoning that is sound apart from one slip
+belongs near the top of the scale; reasoning that arrives at a plausible number
+by guessing or by circular argument belongs near the bottom even if that number
+turns out to be correct.""",
+    scale_min=1,
+    scale_max=5,
+    cot_steps=[
+        "First, state the method the reference solution uses and the key intermediate quantities it derives.",
+        "Next, trace the response's reasoning step by step, noting where it follows that method and where it diverges.",
+        "Then, check each arithmetic operation the response performs and flag any that are incorrect.",
+        "Finally, weigh the severity of what you found against the score guide -- an isolated slip is not the same as pervasive confusion or guessing -- and choose the score.",
+    ],
 )
 
 
