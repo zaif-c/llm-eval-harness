@@ -1,0 +1,11 @@
+prompt_id,input,output,latency_ms,timestamp,model,error,expected,category,exact_match,fuzzy_score,contains_expected,semantic_score
+math_1,What is 15 + 27? Answer with just the number.,42,790.55,2026-09-23T20:01:45.439587+00:00,gpt-4o-mini-2024-07-18,,42,arithmetic,1,1.0,1,0.99999994
+math_2,What is 100 divided by 4? Answer with just the number.,25,667.02,2026-09-23T20:01:46.106709+00:00,gpt-4o-mini-2024-07-18,,25,arithmetic,1,1.0,1,0.99999994
+math_3,What is 7 times 8? Answer with just the number.,56,1381.44,2026-09-23T20:01:47.488247+00:00,gpt-4o-mini-2024-07-18,,56,arithmetic,1,1.0,1,1.0
+capital_1,What is the capital of Japan? Answer with just the city name.,Tokyo,1005.7,2026-09-23T20:01:48.494045+00:00,gpt-4o-mini-2024-07-18,,Tokyo,geography,1,1.0,1,0.99999994
+capital_2,What is the capital of Australia? Answer with just the city name.,Canberra,703.97,2026-09-23T20:01:49.198127+00:00,gpt-4o-mini-2024-07-18,,Canberra,geography,1,1.0,1,1.0
+capital_3,What is the capital of Brazil? Answer with just the city name.,Brasília,728.7,2026-09-23T20:01:49.927112+00:00,gpt-4o-mini-2024-07-18,,Brasília,geography,1,1.0,1,1.0
+science_1,What is the chemical symbol for gold? Answer with just the symbol.,Au,635.86,2026-09-23T20:01:50.563097+00:00,gpt-4o-mini-2024-07-18,,Au,science,1,1.0,1,1.0
+science_2,How many planets are in our solar system? Answer with just the number.,8,765.4,2026-09-23T20:01:51.328629+00:00,gpt-4o-mini-2024-07-18,,8,science,1,1.0,1,0.9999999
+science_3,What is the boiling point of water in Celsius? Answer with just the number.,100,719.91,2026-09-23T20:01:52.048645+00:00,gpt-4o-mini-2024-07-18,,100,science,1,1.0,1,1.0
+trivia_1,In what year did World War II end? Answer with just the year.,1945,968.78,2026-09-23T20:01:53.017537+00:00,gpt-4o-mini-2024-07-18,,1945,history,1,1.0,1,1.0

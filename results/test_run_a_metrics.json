@@ -1,0 +1,32 @@
+{
+  "total_samples": 10,
+  "successful_calls": 10,
+  "exact_match": {
+    "mean": 1.0,
+    "std": 0.0,
+    "min": 1,
+    "max": 1,
+    "count": 10
+  },
+  "fuzzy_score": {
+    "mean": 1.0,
+    "std": 0.0,
+    "min": 1.0,
+    "max": 1.0,
+    "count": 10
+  },
+  "contains_expected": {
+    "mean": 1.0,
+    "std": 0.0,
+    "min": 1,
+    "max": 1,
+    "count": 10
+  },
+  "semantic_score": {
+    "mean": 1.0,
+    "std": 0.0,
+    "min": 1.0,
+    "max": 1.0,
+    "count": 10
+  }
+}

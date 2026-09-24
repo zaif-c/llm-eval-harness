@@ -1,0 +1,62 @@
+[
+    {
+        "prompt_id": "math_1",
+        "input": "What is 15 + 27? Answer with just the number.",
+        "expected": "42",
+        "category": "arithmetic"
+    },
+    {
+        "prompt_id": "math_2",
+        "input": "What is 100 divided by 4? Answer with just the number.",
+        "expected": "25",
+        "category": "arithmetic"
+    },
+    {
+        "prompt_id": "math_3",
+        "input": "What is 7 times 8? Answer with just the number.",
+        "expected": "56",
+        "category": "arithmetic"
+    },
+    {
+        "prompt_id": "capital_1",
+        "input": "What is the capital of Japan? Answer with just the city name.",
+        "expected": "Tokyo",
+        "category": "geography"
+    },
+    {
+        "prompt_id": "capital_2",
+        "input": "What is the capital of Australia? Answer with just the city name.",
+        "expected": "Canberra",
+        "category": "geography"
+    },
+    {
+        "prompt_id": "capital_3",
+        "input": "What is the capital of Brazil? Answer with just the city name.",
+        "expected": "Brasília",
+        "category": "geography"
+    },
+    {
+        "prompt_id": "science_1",
+        "input": "What is the chemical symbol for gold? Answer with just the symbol.",
+        "expected": "Au",
+        "category": "science"
+    },
+    {
+        "prompt_id": "science_2",
+        "input": "How many planets are in our solar system? Answer with just the number.",
+        "expected": "8",
+        "category": "science"
+    },
+    {
+        "prompt_id": "science_3",
+        "input": "What is the boiling point of water in Celsius? Answer with just the number.",
+        "expected": "100",
+        "category": "science"
+    },
+    {
+        "prompt_id": "trivia_1",
+        "input": "In what year did World War II end? Answer with just the year.",
+        "expected": "1945",
+        "category": "history"
+    }
+]
