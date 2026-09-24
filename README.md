@@ -107,16 +107,6 @@ The judge reads the probability distribution over the score token rather than ju
 
 Timed and retried per request (60s default, exponential backoff with jitter), concurrent by default (8 threads), and checkpointed to JSONL as each row completes — a crash at row 190 of 200 does not discard 190 paid calls. Errors that will fail identically on every retry (bad key, bad model id) skip the backoff entirely and fail in seconds rather than minutes. Failures are bucketed by cause, because a rate limit and a typo'd model id call for different fixes.
 
-## Tests
-
-```bash
-python tests/run_tests.py            # 23 tests, ~3.5 min (makes real API calls)
-python tests/run_tests.py --offline  # 13 tests, ~11s, no network
-python tests/run_tests.py -k resume  # filter by name
-```
-
-Tests assert pipeline mechanics — row counts, resume arithmetic, ordering, schemas, metric edge cases — and deliberately never assert that the model answers correctly. A suite that goes red because a model rephrased something is a suite you learn to ignore.
-
 ## Configuration
 
 `.env`, or the environment:
@@ -138,7 +128,6 @@ llm_eval/
   scoring.py    reference-based metrics. Never calls the API.
   judge.py      LLM-as-judge with logprob-weighted scoring.
 run_eval.py     CLI. The only place that orders the layers.
-tests/          one-command test suite.
 datasets/       demo datasets.
 ```
 

@@ -24,6 +24,9 @@ build/
 results/
 test_run.csv
 
+# Test suite — maintained locally, not published
+tests/
+
 # IDE
 .idea/
 .vscode/
