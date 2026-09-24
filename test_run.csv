@@ -1,3 +1,0 @@
-prompt_id,input,output,latency_ms,timestamp,model,error
-test_1,What is 2+2? Answer with just the number.,4,1268.32,2026-09-24T01:27:21.301118+00:00,gpt-4o-mini-2024-07-18,
-test_2,Capital of France? Answer with just the city name.,Paris,669.34,2026-09-24T01:27:21.970546+00:00,gpt-4o-mini-2024-07-18,
