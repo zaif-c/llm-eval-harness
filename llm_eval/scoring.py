@@ -24,10 +24,15 @@ Two conventions hold throughout this file and are worth internalizing:
      make the summary block unreadable and would make a mean across metrics
      meaningless. This is why negative cosine is floored at 0 in score_semantic.
 
-Why hand-rolled BLEU/ROUGE rather than sacrebleu or rouge-score: the exact
-variant of these metrics matters when comparing to a published number, and
-having the implementation in the repo means the variant is knowable rather than
-assumed. The tradeoff is stated plainly in FRAMEWORK.md.
+BLEU and ROUGE come from the `evaluate` library rather than being hand-rolled.
+They are standardized metrics with canonical reference implementations, so
+reimplementing them buys nothing and adds a surface for subtle bugs. What is
+implemented here is only what has no canonical library form — exact match,
+substring containment, token F1 — plus semantic cosine, which is a thin wrapper
+over sentence-transformers.
+
+One caveat is handled explicitly in score_bleu: the library's default BLEU-4
+scores a *correct* one-word answer 0, because there are no 4-grams to match.
 
 Usage:
     from scoring import score_exact, score_fuzzy, score_semantic, compute_metrics
@@ -40,7 +45,6 @@ Usage:
     metrics = compute_metrics(df)
 """
 
-import math
 import os
 import re
 from collections import Counter
@@ -360,10 +364,7 @@ def _token_counts(text: str) -> Counter:
 def _prf(overlap: int, pred_total: int, gold_total: int) -> tuple[float, float, float]:
     """Precision, recall, and F1 from an overlap count. Both empty counts as a match.
 
-    Shared by score_tokens, _rouge_n, and _rouge_l, because all three are the
-    same arithmetic over different definitions of "overlap" — n-gram matches for
-    ROUGE-N, LCS length for ROUGE-L, token multiset intersection for token F1.
-    Factoring it out is what keeps those three consistent with each other.
+    Used by score_tokens, where "overlap" is the token multiset intersection.
 
       precision = overlap / |prediction|   "how much of what I said was right"
       recall    = overlap / |gold|         "how much of the answer did I get"
@@ -429,129 +430,24 @@ def score_tokens(
     return df
 
 
-def _ngram_counts(tokens: list[str], n: int) -> Counter:
-    """Multiset of contiguous n-grams.
+# =============================================================================
+# BLEU / ROUGE (via the `evaluate` library)
+#
+# Loaded lazily and cached. evaluate.load() fetches a builder script from the
+# HuggingFace Hub on first use (~7s cold, cached afterwards), so importing this
+# module must not trigger it — only calling score_bleu/score_rouge should.
+# =============================================================================
 
-    Tuples (not strings) as keys so that ["new", "york"] and ["newyork"] cannot
-    collide. The range stops at len(tokens) - n + 1, which correctly yields an
-    empty Counter when the text is shorter than n.
-    """
-    return Counter(tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1))
-
-
-def sentence_bleu(prediction: str, reference: str, max_n: int = 4) -> float:
-    """
-    Sentence BLEU with add-one smoothing.
-
-    N-gram order is capped by the shorter text, so a one-token answer is BLEU-1
-    instead of an automatic 0 from missing 4-grams. Add-one smoothing keeps a
-    single missing n-gram from zeroing the whole score.
-
-    BLEU is precision-oriented and was designed for corpus-level MT evaluation,
-    so applying it per sentence is already a compromise; the two adaptations
-    above are what make it behave sanely on short QA answers. Both are
-    deviations from textbook BLEU and should be stated as such rather than
-    compared against a published BLEU number.
-    """
-    pred = normalize_text(prediction).split()
-    gold = normalize_text(reference).split()
-    if not pred or not gold:
-        return 0.0
-
-    # Cap the n-gram order. Textbook BLEU-4 on a 2-token answer would find zero
-    # 4-grams and return 0 for a perfect match; capping at len makes it BLEU-2.
-    order = min(max_n, len(pred), len(gold))
-    precisions = []
-    for n in range(1, order + 1):
-        pred_ng = _ngram_counts(pred, n)
-        gold_ng = _ngram_counts(gold, n)
-        # Clipped precision: an n-gram can only match as many times as it
-        # appears in the reference, so repeating a correct word cannot inflate
-        # the score. gold_ng[ng] is 0 for a missing key (Counter default).
-        overlap = sum(min(count, gold_ng[ng]) for ng, count in pred_ng.items())
-        total = sum(pred_ng.values())
-        # Add-one (Laplace) smoothing. Without the +1s, a single order with zero
-        # matches makes one precision 0, and the geometric mean below drives the
-        # whole score to 0 regardless of how good the other orders were.
-        precisions.append((overlap + 1) / (total + 1))
-
-    # Geometric mean of the precisions, computed in log space to avoid
-    # underflow from multiplying several small numbers.
-    log_avg = sum(math.log(p) for p in precisions) / order
-    # Brevity penalty. BLEU is precision-only, so without this a one-word answer
-    # that happens to be in the reference would score 1.0. The penalty only
-    # applies when the prediction is shorter; a too-long prediction is already
-    # punished by precision.
-    if len(pred) >= len(gold):
-        brevity = 1.0
-    else:
-        brevity = math.exp(1 - len(gold) / len(pred))
-    return brevity * math.exp(log_avg)
+@lru_cache(maxsize=1)
+def _get_bleu():
+    import evaluate
+    return evaluate.load("bleu")
 
 
-def _lcs_length(a: list[str], b: list[str]) -> int:
-    """Length of the longest common subsequence. Used by ROUGE-L.
-
-    Standard dynamic-programming LCS, but kept to two rows instead of a full
-    len(a) x len(b) table, since only the previous row is ever read. That makes
-    it O(len(b)) memory instead of O(len(a) * len(b)) — irrelevant for short
-    answers, but it keeps a long-form response from allocating a huge table.
-
-    `prev[j-1] + 1` on a match extends the subsequence diagonally;
-    `max(prev[j], curr[-1])` on a mismatch carries forward the better of
-    "skip a token from a" and "skip a token from b".
-
-    Subsequence, not substring: the matched tokens need not be adjacent, only in
-    order. That is what makes ROUGE-L credit a correct answer with extra words
-    interleaved.
-    """
-    if not a or not b:
-        return 0
-    prev = [0] * (len(b) + 1)
-    for token in a:
-        curr = [0]  # column 0 is always 0 (empty prefix of b)
-        for j, other in enumerate(b, start=1):
-            if token == other:
-                curr.append(prev[j - 1] + 1)
-            else:
-                curr.append(max(prev[j], curr[-1]))
-        prev = curr
-    return prev[-1]
-
-
-def _rouge_n(prediction: str, reference: str, n: int) -> float:
-    """ROUGE-N F1: overlap of n-grams between prediction and reference.
-
-    Split out from _rouge_l after a bug where ROUGE-1 was routed through the LCS
-    path and therefore was not actually measuring unigram overlap. They are
-    genuinely different metrics and need separate implementations.
-    """
-    pred = normalize_text(prediction).split()
-    gold = normalize_text(reference).split()
-    if not pred and not gold:
-        return 1.0
-    pred_counts = _ngram_counts(pred, n)
-    gold_counts = _ngram_counts(gold, n)
-    # No n-gram on either side (text shorter than n) is not a match.
-    # This is why rouge2 is 0 on every single-word answer, even a correct one —
-    # expected behavior, not a bug, but it makes rouge2 useless on short QA.
-    if not pred_counts or not gold_counts:
-        return 0.0
-    overlap = sum(min(count, gold_counts[ng]) for ng, count in pred_counts.items())
-    _, _, f1 = _prf(overlap, sum(pred_counts.values()), sum(gold_counts.values()))
-    return f1
-
-
-def _rouge_l(prediction: str, reference: str) -> float:
-    """ROUGE-L F1: longest common subsequence, so shared order still counts.
-
-    Unlike _rouge_n there is no empty-input guard here, because _prf already
-    handles both-empty (returns 1.0) and one-empty (returns 0.0) correctly.
-    """
-    pred = normalize_text(prediction).split()
-    gold = normalize_text(reference).split()
-    _, _, f1 = _prf(_lcs_length(pred, gold), len(pred), len(gold))
-    return f1
+@lru_cache(maxsize=1)
+def _get_rouge():
+    import evaluate
+    return evaluate.load("rouge")
 
 
 def score_bleu(
@@ -559,16 +455,42 @@ def score_bleu(
     output_col: Optional[str] = None,
     expected_col: str = "expected",
 ) -> pd.DataFrame:
-    """Add sentence BLEU. Most useful when answers are a sentence or longer."""
+    """Add sentence BLEU. Most useful when answers are a sentence or longer.
+
+    Two deliberate departures from calling the library with its defaults:
+
+      max_order is capped at the shorter text's token count. At the default
+      order of 4, a *correct* one-word answer scores 0 — there are no 4-grams to
+      match — so "Paris" vs "Paris" reads as a total miss. Capping makes that
+      case BLEU-1 and scores it 1.0.
+
+      smooth stays off. With smoothing on, "London" scored against "Paris"
+      returns 0.84, which would make a flatly wrong one-word answer look nearly
+      correct.
+    """
     df = df.copy()
     output_col = output_col or prediction_column(df)
+    if df.empty:
+        df["bleu"] = pd.Series(dtype=float)
+        return df
+    bleu = _get_bleu()
 
     def score_row(row):
         output = row.get(output_col)
         expected = row.get(expected_col)
         if output is None or expected is None:
             return 0.0
-        return sentence_bleu(str(output), str(expected))
+        pred = normalize_text(str(output))
+        gold = normalize_text(str(expected))
+        # bleu.compute raises ZeroDivisionError on an empty prediction, which
+        # happens for real on truncated or refused generations.
+        if not pred or not gold:
+            return 0.0
+        order = max(1, min(4, len(pred.split()), len(gold.split())))
+        scores = bleu.compute(
+            predictions=[pred], references=[[gold]], max_order=order
+        )
+        return float(scores["bleu"])
 
     df["bleu"] = df.apply(score_row, axis=1)
     return df
@@ -585,29 +507,40 @@ def score_rouge(
     rouge1 and rouge2 are n-gram overlap. rougeL is longest common subsequence,
     so it still credits answers that share order without being identical.
 
-    All three are computed in one pass rather than three, since they share the
-    same normalization and row iteration and .apply is the expensive part.
+    Computed in a single batched call with use_aggregator=False, which returns
+    one score per row instead of a corpus average. Batching matters: per-row
+    .compute() calls cost ~1.3s per 100 rows against ~0.01s for one batch.
+
+    Note that rouge2 is 0 for any answer shorter than two tokens, correct or
+    not, since there is no bigram to match. That is real ROUGE behavior, but it
+    makes the column uninformative on short-answer data.
     """
     df = df.copy()
     output_col = output_col or prediction_column(df)
+    cols = ("rouge1", "rouge2", "rougeL")
+    # Empty frame, or no reference column to score against at all.
+    if df.empty or expected_col not in df.columns:
+        for col in cols:
+            df[col] = pd.Series(dtype=float) if df.empty else 0.0
+        return df
 
-    def score_row(row):
-        output = row.get(output_col)
-        expected = row.get(expected_col)
-        if output is None or expected is None:
-            return 0.0, 0.0, 0.0
-        output = str(output)
-        expected = str(expected)
-        return (
-            _rouge_n(output, expected, 1),
-            _rouge_n(output, expected, 2),
-            _rouge_l(output, expected),
-        )
+    # Normalized here rather than left to the library's own tokenizer, so that
+    # ROUGE agrees with every other metric in this file about what counts as
+    # the same string.
+    preds = [
+        normalize_text(str(v)) if v is not None else "" for v in df[output_col]
+    ]
+    golds = [
+        normalize_text(str(v)) if v is not None else "" for v in df[expected_col]
+    ]
 
-    scored = df.apply(score_row, axis=1, result_type="expand")
-    df["rouge1"] = scored[0]
-    df["rouge2"] = scored[1]
-    df["rougeL"] = scored[2]
+    scores = _get_rouge().compute(
+        predictions=preds, references=golds, use_aggregator=False
+    )
+    # Cast because rougeL comes back as int 0 (not 0.0) for empty rows, which
+    # would give the column an object dtype.
+    for col in cols:
+        df[col] = [float(v) for v in scores[col]]
     return df
 
 

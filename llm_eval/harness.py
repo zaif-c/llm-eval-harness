@@ -289,18 +289,6 @@ class HarnessConfig:
     # provider rate-limits, which costs more time than it saves.
     max_workers: int = 8
 
-    # How many times to ask each prompt. 1 is a normal run. Above 1 the same
-    # prompt is sent n_samples times as independent requests, which is what
-    # makes run-to-run variance measurable instead of assumed.
-    #
-    # Independent requests rather than the API's own `n` parameter, for two
-    # reasons. Portability: `n>1` is an OpenAI-ism that Anthropic and others do
-    # not accept through OpenRouter, and this harness has to work against any
-    # model id. Fidelity: the question being asked is "if I run this eval again,
-    # do I get the same number", and separate requests are what a rerun actually
-    # is. The cost is paying for the prompt tokens n times.
-    n_samples: int = 1
-
     # Output settings
     output_csv: Optional[str] = None  # If set, writes results to this path
 
@@ -363,27 +351,6 @@ PERMANENT_ERRORS = (
     NotFoundError,
     BadRequestError,
 )
-
-
-def row_key(prompt_id, sample_index=0) -> str:
-    """Identity of a single row: a prompt plus which sample of it this is.
-
-    `prompt_id` alone is NOT unique once n_samples > 1, and this is the sharp
-    edge of the whole variance feature. The resume map and the batch result maps
-    are keyed by this string; keying them on prompt_id would silently collapse
-    every sample of a prompt into one entry, discarding all but one of the calls
-    that were just paid for and — worse — doing it without an error, so the run
-    would simply report less variance than it measured.
-
-    The same function is used by judge_batch, which had the identical collision:
-    n rows sharing a prompt_id would have had judgments assigned to whichever
-    one was written last.
-
-    A string rather than a tuple because these keys are round-tripped through
-    JSONL checkpoints, where keys must be strings anyway. `sample_index`
-    defaults to 0 so a checkpoint written before this existed still resolves.
-    """
-    return f"{prompt_id}::{sample_index}"
 
 
 def classify_error(error: Optional[str]) -> Optional[str]:
@@ -528,7 +495,6 @@ def run_single(
     prompt_id: str,
     input_text: str,
     config: HarnessConfig,
-    sample_index: int = 0,
 ) -> dict:
     """
     Run inference on a single prompt with exponential backoff retry.
@@ -591,11 +557,6 @@ def run_single(
         finish_reason = getattr(choice, "finish_reason", None)
         row = {
             "prompt_id": prompt_id,
-            # Always written, even on a normal n_samples=1 run where it is
-            # always 0. A stable schema is worth one integer column: the resume
-            # key reads it unconditionally, and a column that appears only
-            # sometimes is how the judge collision got missed in the first place.
-            "sample_index": sample_index,
             # The *original* input, not the CoT-augmented one actually sent.
             "input": input_text,
             "output": output,
@@ -632,7 +593,6 @@ def run_single(
     # numeric avoids an object-dtype column that would break .sum().
     row = {
         "prompt_id": prompt_id,
-        "sample_index": sample_index,
         "input": input_text,
         "output": None,
         "reasoning": None,
@@ -754,30 +714,19 @@ def batch_run(
     client = make_client()
     checkpoint = Checkpoint(config.checkpoint_path)
 
-    # One task per (prompt, sample). With the default n_samples=1 this is just
-    # the prompt list. Prompt-major ordering, so all samples of a prompt sit
-    # next to each other in the output CSV and can be compared by eye.
-    tasks = [
-        (prompt, sample)
-        for prompt in prompts
-        for sample in range(max(1, config.n_samples))
-    ]
-    total = len(tasks)
+    total = len(prompts)
 
     # Resume: reuse rows already on disk, only call for what is missing.
     # Failed rows are retried, since a row with an error cost a call but has
-    # no usable output.
-    #
-    # Keyed by row_key(prompt_id, sample_index), which is what makes n>1 safe.
-    # The str() inside row_key also normalizes a prompt_id that was an int in
-    # the source JSON, since json.dumps may have written it either way.
+    # no usable output. Keys are str() so an int prompt_id in the source JSON
+    # still matches the same id written as a string in the checkpoint.
     done: dict[str, dict] = {}
     if config.resume:
         for row in checkpoint.load():
             if row.get("error") is None:
-                done[row_key(row.get("prompt_id"), row.get("sample_index", 0))] = row
+                done[str(row.get("prompt_id"))] = row
 
-    pending = [t for t in tasks if row_key(t[0]["prompt_id"], t[1]) not in done]
+    pending = [p for p in prompts if str(p["prompt_id"]) not in done]
     # Never spin up more threads than there is work: a 3-row smoke test should
     # not create 8 threads. The outer max(1, ...) guards the empty-pending case,
     # where min() would yield 0 and ThreadPoolExecutor would reject it.
@@ -786,13 +735,8 @@ def batch_run(
     if verbose:
         if done:
             print(f"Resuming: {len(done)} rows already in {config.checkpoint_path}")
-        # Says "calls" rather than "prompts" when sampling, since the two
-        # numbers differ by a factor of n_samples and conflating them makes the
-        # cost of a variance run look smaller than it is.
-        unit = "calls" if config.n_samples > 1 else "prompts"
-        suffix = f" ({len(prompts)} prompts x {config.n_samples} samples)" if config.n_samples > 1 else ""
-        print(f"Running {len(pending)}/{total} {unit} with model={config.model} "
-              f"({'sequential' if workers == 1 else f'{workers} workers'}){suffix}")
+        print(f"Running {len(pending)}/{total} prompts with model={config.model} "
+              f"({'sequential' if workers == 1 else f'{workers} workers'})")
         print("-" * 50)
 
     # Progress counter. A dict rather than a plain int because it is mutated
@@ -802,11 +746,9 @@ def batch_run(
     counter = {"n": 0}
     counter_lock = threading.Lock()
 
-    def run_one(prompt: dict, sample_index: int) -> dict:
+    def run_one(prompt: dict) -> dict:
         """One unit of work, as executed by a worker thread."""
-        result = run_single(
-            client, prompt["prompt_id"], prompt["input"], config, sample_index
-        )
+        result = run_single(client, prompt["prompt_id"], prompt["input"], config)
         # Carry forward any extra keys from the input (e.g., 'expected', 'category')
         # so the gold answer travels on the same row as the output. `if key not
         # in result` protects the harness's own columns from being clobbered by
@@ -827,10 +769,7 @@ def batch_run(
             # interleaving multi-line output is unreadable, and the numbering is
             # completion order, not dataset order, anyway.
             status = "ok" if result["error"] is None else "FAILED"
-            # The sample suffix only appears when sampling, so a normal run's
-            # progress output is unchanged.
-            tag = f"{prompt['prompt_id']}" if config.n_samples == 1 else f"{prompt['prompt_id']}#{sample_index}"
-            print(f"[{n}/{len(pending)}] {tag}: {status}")
+            print(f"[{n}/{len(pending)}] {prompt['prompt_id']}: {status}")
         return result
 
     # Results are collected into a dict keyed by prompt_id rather than appended
@@ -842,15 +781,15 @@ def batch_run(
     if workers == 1:
         # Plain loop with no pool at all. This is the path to use when debugging
         # a provider error, since a traceback is not interleaved with 7 others.
-        for prompt, sample in pending:
-            fresh[row_key(prompt["prompt_id"], sample)] = run_one(prompt, sample)
+        for prompt in pending:
+            fresh[str(prompt["prompt_id"])] = run_one(prompt)
     else:
         # The dict maps future -> key, which is how the result gets filed under
-        # the right (prompt, sample) when it completes out of order.
+        # the right prompt when it completes out of order.
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(run_one, p, s): row_key(p["prompt_id"], s)
-                for p, s in pending
+                pool.submit(run_one, p): str(p["prompt_id"])
+                for p in pending
             }
             for future in as_completed(futures):
                 # .result() re-raises anything the worker raised. That is
@@ -858,13 +797,13 @@ def batch_run(
                 # rows, so anything still raising here is a real bug.
                 fresh[futures[future]] = future.result()
 
-    # Rebuild in task order from resumed and fresh rows, so completion
+    # Rebuild in dataset order from resumed and fresh rows, so completion
     # order never reorders the frame. `done.get(...) or fresh[...]` reads as
-    # "prefer the resumed row, else the one just computed"; every task is in
+    # "prefer the resumed row, else the one just computed"; every prompt is in
     # exactly one of the two, so the fresh lookup cannot KeyError.
     results = [
-        done.get(row_key(p["prompt_id"], s)) or fresh[row_key(p["prompt_id"], s)]
-        for p, s in tasks
+        done.get(str(p["prompt_id"])) or fresh[str(p["prompt_id"])]
+        for p in prompts
     ]
 
     df = pd.DataFrame(results)
@@ -874,7 +813,7 @@ def batch_run(
     # at a glance during a timed run: identity, then answer, then diagnostics,
     # then the dataset's own columns (expected, category) at the end.
     standard_cols = [
-        "prompt_id", "sample_index", "input", "output", "answer", "answer_extracted", "reasoning",
+        "prompt_id", "input", "output", "answer", "answer_extracted", "reasoning",
         "finish_reason", "truncated", "prompt_tokens", "completion_tokens",
         "total_tokens", "latency_ms", "timestamp", "model", "error", "error_type",
     ]

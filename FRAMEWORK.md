@@ -2,6 +2,8 @@
 
 Living notes for explaining and defending this harness. Update this file when behavior changes.
 
+**This is the `simplified` branch.** It is the version to actually drive during the interview. `main` holds the full prep build, including multi-sample variance measurement and the hand-rolled BLEU/ROUGE implementations. Anything cut from here is one `git checkout main -- <path>` away, so the cuts are reversible in seconds if the real task turns out to need them. What changed, and why, is recorded in `ROADMAP.md` under "Simplification pass".
+
 The runner is scoring-agnostic and talks to one OpenRouter client. Ground-truth metrics run after inference when the dataset has an `expected` column. `--judge` runs the LLM judge on the same rows, with or without ground truth.
 
 **This file and the source are meant to be read together.** This is the map: architecture, execution order, and the defense of each decision, at the level you would present it. The source is the territory: every module, function, and non-obvious line carries an inline comment explaining what it does and why it is written that way, including the failure mode each guard exists to prevent. When the two disagree, the source is correct and this file is stale.
@@ -46,7 +48,7 @@ Open-ended demo: `python run_eval.py --dataset datasets/open_ended_demo.json --j
 
 ## Design decisions
 
-**Hand-rolled, not DeepEval, lm-evaluation-harness, promptfoo, or RAGAS.** The task is unknown until kickoff. A pipeline you can narrate is a stronger research-ops signal than calling a library. The cost is that BLEU and ROUGE here are our implementations, so the exact variant has to be knowable.
+**Hand-rolled, not DeepEval, lm-evaluation-harness, promptfoo, or RAGAS.** The task is unknown until kickoff. A pipeline you can narrate is a stronger research-ops signal than calling a library. BLEU and ROUGE come from `evaluate` rather than being reimplemented — those have canonical forms; exact match, token F1, and the judge do not.
 
 **Ground truth before the judge.** A wrong score on a known answer is a harness bug. A wrong judge score is a rubric bug. `run_eval.py` still runs ground truth first when `expected` exists, then the judge. Pass `--judge` only when you want the second pass. Open-ended data has no `expected`, so the judge is the whole score.
 
@@ -60,7 +62,7 @@ def make_client() -> OpenAI:
     return OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
 ```
 
-**Temperature 0.** The eval should measure the prompt, not the sampler, and a rerun should be comparable. This setting hides variance. Reliability across samples has not been measured.
+**Temperature 0.** The eval should measure the prompt, not the sampler, and a rerun should be comparable. It does not make the model deterministic — that was measured during prep and the result is under "Measured result" below — but on short-answer data the residual variation is stylistic and scores move by ~0.001.
 
 **Chain of thought scores the `ANSWER:` line, not the essay.** Exact match and BLEU on the full reasoning would punish a correct answer for being explained. The logged `input` stays the original question. The instruction is only on the wire.
 
@@ -90,17 +92,18 @@ If the model never writes that line, the full output is scored and `answer_extra
 
 **`latency_ms` is timed inside the request, not around the retry loop.** The refactor could easily have started the clock before `call_with_retry` and quietly folded backoff sleep into the latency column, which would corrupt every latency conclusion in the presentation. The timer lives inside the `send()` closure instead, so the column is the successful attempt only. Confirmed with a call that slept 1.3s in backoff and still reported 105ms.
 
-**Results are placed by index, not appended.** Each future is submitted with its dataset position and written into a preallocated list at that index.
+**Results are filed by key, not appended.** Each future is submitted against its `prompt_id`, and the frame is rebuilt in dataset order at the end.
 
 ```python
-results = [None] * total
 with ThreadPoolExecutor(max_workers=workers) as pool:
-    futures = {pool.submit(run_one, i, prompt): i for i, prompt in enumerate(prompts)}
+    futures = {pool.submit(run_one, p): str(p["prompt_id"]) for p in pending}
     for future in as_completed(futures):
-        results[futures[future]] = future.result()
+        fresh[futures[future]] = future.result()
+
+results = [done.get(str(p["prompt_id"])) or fresh[str(p["prompt_id"])] for p in prompts]
 ```
 
-`as_completed` yields in completion order, so appending would interleave rows by whichever call returned first. Because `expected` and `category` are copied onto the row inside the worker, a reordering bug would not crash anything: it would pair each output with another row's gold answer and quietly corrupt every score. Dataset order is also what makes two runs diffable. `judge_batch` follows the same rule for the same reason. Per-call `latency_ms` is still measured inside each call and is unaffected by concurrency, but batch wall clock is no longer the sum of the latencies. Say that before someone adds them up.
+Keying rather than indexing is what lets resumed and freshly computed rows be merged in one expression: every prompt is in exactly one of the two maps. `as_completed` yields in completion order, so appending would interleave rows by whichever call returned first. Because `expected` and `category` are copied onto the row inside the worker, a reordering bug would not crash anything: it would pair each output with another row's gold answer and quietly corrupt every score. Dataset order is also what makes two runs diffable. `judge_batch` follows the same rule for the same reason. Per-call `latency_ms` is still measured inside each call and is unaffected by concurrency, but batch wall clock is no longer the sum of the latencies. Say that before someone adds them up.
 
 **Rows are checkpointed to JSONL as they finish, not written once at the end.** A batch is the expensive part of a run. Writing the CSV only after the last row meant a crash at row 190 of 200 discarded 190 paid API calls, and the judge wrote nothing at all until it returned. `Checkpoint.append` writes each row the moment its call returns, before anything downstream can fail.
 
@@ -140,17 +143,9 @@ That warning exists because the live test produced exactly it. On the 16-questio
 
 **`llm_eval/analysis.py` and the `analysis/` directory are deliberately different things.** The module holds reusable primitives that the pipeline itself imports and that have unit tests. The directory holds exploratory scripts that import those primitives and add ad-hoc slicing. The split is forced by `run_eval.py` needing to import the statistics — the pipeline should not depend on a scratch folder — and it keeps one implementation of the math rather than a pipeline copy and a notebook copy that drift.
 
-**Row identity is `(prompt_id, sample_index)`, not `prompt_id`.** With `--n-samples N` the same prompt produces N rows, and every map keyed on prompt_id alone silently collapses them — keeping one row and discarding the calls that were just paid for, with no error raised. `row_key()` in `harness.py` is the single definition, used by the resume map and the result maps in both `batch_run` and `judge_batch`.
+**Row identity is `prompt_id`.** One prompt produces one row. Resume maps and result maps in `batch_run` and `judge_batch` key on `str(prompt_id)` so an int id in the source JSON still matches the same id written as a string in the checkpoint.
 
-The judge had the identical collision and it was the more dangerous of the two. There, `fresh[prompt_id]` would have retained whichever judgment finished last and then assigned it to every sample of that prompt, so the variance being measured would have been erased by the tool measuring it. Demonstrated directly: on a 2-prompt × 3-sample set, keying on prompt_id keeps 2 of 6 rows and the composite key keeps 6 of 6. `sample_index` is written on every row even when it is always 0, because a column that appears only sometimes is how this was missed the first time.
-
-**Samples are independent requests, not the API's `n` parameter.** Two reasons. Portability: `n>1` is an OpenAI-ism that Anthropic and others reject through OpenRouter, and the harness has to work against any model id. Fidelity: the question is "if I run this eval again, do I get the same number", and separate requests are what a rerun actually is — one request returning N choices shares a single sampling call and a single latency. The cost is paying for the prompt tokens N times, which is the right trade when the alternative is an unquantified claim.
-
-**Two variances, because they answer different questions.** *Within-prompt* is the standard deviation of a score across one prompt's samples, averaged over prompts — a property of the model. *Run-level* treats each `sample_index` as one complete replicate of the dataset, computes the aggregate per replicate, and reports the spread across them. The second is the decision-relevant one and the reason the feature exists: without it, "model A scored 0.72 and model B scored 0.75" is unfalsifiable, and with it that gap is either outside the run-to-run spread or it is noise. Spread (max − min) rather than standard deviation, because with three replicates a standard deviation is barely meaningful and the range is what a reader wants.
-
-`output_identical_rate` is tracked separately from every score, because byte-identical text is the stricter and more direct claim. A model can be perfectly stable in score while varying its wording, and those are different findings — which is exactly what the live run showed.
-
-**Measured result: temperature 0 is not deterministic.** On the 16-question hard set, 5 of 16 prompts (31%) returned different text across three samples. The differences were purely stylistic — *"following the death of President Zachary Taylor"* versus *"assuming the presidency after the death of Zachary Taylor"* — so `exact_match` and `contains_expected` were perfectly stable and the graded metrics moved by about 0.001. The defensible statement is therefore "not deterministic, but stable to three decimal places on this set", which is a stronger claim than either "it is deterministic" or "it varies". A control run at temperature 1.0 confirmed the tool is measuring and not just reporting zeros: text variation doubled to 63% of prompts and score spread roughly tripled.
+**Measured result: temperature 0 is not deterministic.** On the 16-question hard set, 5 of 16 prompts (31%) returned different text across three samples. The differences were purely stylistic — *"following the death of President Zachary Taylor"* versus *"assuming the presidency after the death of Zachary Taylor"* — so `exact_match` and `contains_expected` were perfectly stable and the graded metrics moved by about 0.001. The defensible statement is therefore "not deterministic, but stable to three decimal places on this set", which is a stronger claim than either "it is deterministic" or "it varies". A control run at temperature 1.0 confirmed the tool is measuring and not just reporting zeros: text variation doubled to 63% of prompts and score spread roughly tripled. Multi-sample variance was measured during prep, then dropped from this branch — a 90-minute interview does not have time for 3× the calls.
 
 **`compute_metrics` returns plain Python types.** pandas aggregations return `numpy.float64` and `numpy.int64`, which `json.dumps` rejects. This was previously patched by a `convert_numpy` helper in `run_eval.py` that walked the dict on the way out. Casting at the source is better: the metrics dict is now serializable for any caller, rather than only for the one caller that remembers to convert it, and the helper is gone.
 
@@ -195,8 +190,8 @@ Every successful row has `prompt_id`, `input`, `output`, `reasoning`, `latency_m
 | `score_fuzzy` | `fuzzy_score` | Jaccard on token sets. Duplicates and order are ignored. Both empty is 1. |
 | `score_contains` | `contains_expected` | 1 if the gold string occurs inside the prediction. Right tool when the model wraps a short answer in a sentence. |
 | `score_tokens` | `token_precision`, `token_recall`, `token_f1` | Multiset overlap, the SQuAD idea. "The capital is Paris" against "Paris" has recall 1 and precision 0.25. |
-| `sentence_bleu` / `score_bleu` | `bleu` | Sentence BLEU. N-gram order is capped by the shorter string, so a one-word answer is BLEU-1, not an automatic 0 from missing 4-grams. Add-one smoothing. Brevity penalty when the prediction is shorter than the reference. |
-| `score_rouge` | `rouge1`, `rouge2`, `rougeL` | Unigram F1, bigram F1, and longest-common-subsequence F1. A one-word answer has no bigram, so `rouge2` is 0 even on an exact match. |
+| `score_bleu` | `bleu` | BLEU via `evaluate`. `max_order` is capped at the shorter string's token count, because default BLEU-4 scores a *correct* one-word answer 0. Smoothing is off — it scores `London` against `Paris` at 0.84. |
+| `score_rouge` | `rouge1`, `rouge2`, `rougeL` | Unigram F1, bigram F1, and longest-common-subsequence F1, via `evaluate`. One batched call with `use_aggregator=False` for per-row scores. A one-word answer has no bigram, so `rouge2` is 0 even on an exact match. |
 | `score_char` | `char_similarity` | `difflib.SequenceMatcher` ratio. Catches a one-character miss that token F1 scores as a total miss. |
 | `score_semantic` | `semantic_score` | Dot product of L2-normalized `all-MiniLM-L6-v2` embeddings, negatives clipped to 0. The model loads on first use from `EMBEDDING_MODEL`. |
 | `score_all` | all of the above | Calls them in that order. `include_semantic=False` skips MiniLM. Blanks every added column to `NaN` on rows with an `error`. |
@@ -206,7 +201,17 @@ Every successful row has `prompt_id`, `input`, `output`, `reasoning`, `latency_m
 
 Token precision, recall, and F1 share `_prf`: overlap divided by prediction length, overlap divided by gold length, then the harmonic mean. Both sides empty counts as a match. Either side empty is 0.
 
-On the demo set, lead with exact match and token F1. BLEU's smoothing gives a wrong one-word answer a score like 0.5 instead of 0. Do not treat BLEU as the headline number on short items. BLEU and ROUGE earn their place once answers are a sentence or longer. Character similarity is the near-miss detector. Semantic similarity is paraphrase, not fact.
+On the demo set, lead with exact match and token F1. BLEU and ROUGE earn their place once answers are a sentence or longer; on one-word items `rouge2` is structurally 0 and BLEU collapses to BLEU-1, so neither is the headline number. Character similarity is the near-miss detector. Semantic similarity is paraphrase, not fact.
+
+**BLEU and ROUGE are the `evaluate` library, called with two non-default arguments.** Reimplementing a standardized metric only adds a surface for subtle bugs, so the swap is the defensible direction — but the defaults are wrong for short-answer QA in two specific ways, both verified directly:
+
+| Case | `evaluate` default | As configured |
+| --- | --- | --- |
+| `Paris` vs `Paris` | **0.0000** — no 4-grams to match | 1.0000 (`max_order` capped at the shorter text) |
+| `London` vs `Paris` | 0.0000 | 0.0000 |
+| `London` vs `Paris`, `smooth=True` | **0.8409** | not used |
+
+The first row is why `max_order` is capped: at the default order of 4 a *correct* one-word answer reads as a total miss. The third row is why smoothing stays off — it would score a flatly wrong one-word answer at 84%, which is a far worse failure than the one it fixes. ROUGE runs as a single batched call with `use_aggregator=False`, which returns per-row scores rather than a corpus average and costs 0.01s per 100 rows against 1.27s for per-row BLEU.
 
 `category` is not a metric. When that column exists, `run_eval.py` prints per-category `exact_match` and `judge_score` for whichever of those columns the run produced.
 
@@ -247,7 +252,9 @@ Grades the judge, not the model. Only has anything to do when both scorers ran o
 | `find_unstable_prompts` | One row per prompt, ranked by score spread. An unstable prompt is usually unstable for a nameable reason — an ambiguous question, an answer on a scoring threshold, a genuine coin flip — and none of those are visible in an aggregate. |
 | `print_variance` | Output stability first, then run-level spread. Metrics that never moved collapse to one line so the interesting ones are not buried. |
 
-`analysis/judge_agreement.py` is the standalone version: point it at any `*_scored.csv` and get the same report with no API calls, plus `--gt-col`, `--top`, and `--by-category`. `analysis/variance.py` is the counterpart for a sampled run, with `--show-outputs` to print the differing responses side by side. All the arithmetic comes from the module, so there is one implementation. Note the asymmetry: agreement can be recomputed from any finished labeled run, but variance cannot be recovered after the fact — the extra calls have to have been made.
+`analysis/judge_agreement.py` is the standalone version: point it at any `*_scored.csv` and get the same report with no API calls, plus `--gt-col`, `--top`, and `--by-category`. All the arithmetic comes from the module, so there is one implementation.
+
+`variance_report`, `find_unstable_prompts`, `print_variance`, and `analysis/variance.py` are **dormant on this branch.** They need a `sample_index` column, which nothing produces now that `--n-samples` is cut, so `variance_report` returns `None` and `run_eval.py` skips the whole block. They are kept rather than deleted because the arithmetic is already written and tested; restoring the feature means restoring `--n-samples` from `main`. Note the asymmetry that motivated the cut: agreement can be recomputed from any finished labeled run, but variance cannot be recovered after the fact — the extra calls have to have been made at inference time.
 
 ## `run_eval.py` and `llm_eval/__init__.py`
 
@@ -276,9 +283,31 @@ Judge-agreement has no flag. It runs whenever `expected` exists and `--judge` wa
 
 `__init__.py` re-exports the public names: `HarnessConfig`, `batch_run`, `run_single`, the score functions, `JudgeConfig`, `judge_batch`, and the four rubrics. Import from `llm_eval` unless a private helper is needed.
 
+## `tests/run_tests.py`
+
+One file, one command, 25 tests. This is the pre-flight check — run it before trusting the pipeline on the real task.
+
+```bash
+python tests/run_tests.py            # everything, ~3.5 min, ~90 API calls
+python tests/run_tests.py --offline  # no network, ~9s
+python tests/run_tests.py -k resume  # only tests matching "resume"
+```
+
+15 offline tests cover the pure functions: `extract_final_answer` last-match-wins, `classify_error` buckets, BLEU `max_order` capping, the empty-prediction guard, per-row ROUGE, failed-rows-are-`NaN`, JSON-serializable metrics, `Checkpoint` torn-line recovery, and `roc_auc` against values checkable by hand. 10 live tests shell out to `run_eval.py` for the integration paths: ground truth, judge plus agreement, open-ended, `--cot`, both resume paths, integer `prompt_id`s, judge resume, and `--score-only`.
+
+**The tests assert plumbing, not model quality.** No test claims the model scores 10/10 — that is a fact about `gpt-4o-mini` on a given afternoon, not about this code, and a suite that goes red because the model rephrased something is a suite you learn to ignore. The one exception is a *floor* of 80% on `--cot` format compliance, where a collapse to zero means `extract_final_answer` or the prompt wiring broke rather than the model got unlucky.
+
+Two tests exist only to guard the simplification: one asserts `--n-samples` is gone from all four places it lived (config field, `run_single` signature, `row_key`, CLI flag), the other asserts `--cot` survived. Removing a feature from three of four places leaves a confusing half-state, and merging `main` back would silently resurrect it.
+
+Live tests declare their prerequisites through `ensure_run()`, which builds a shared run only if its artifacts are missing. A full pass reuses and pays nothing extra; any single test still works under `-k`. The first draft had the resume tests silently depending on an earlier test having run, which is the wrong thing to debug under a clock.
+
 ## Environment
 
-`requirements.txt` pins `numpy`, `openai`, `pandas`, `python-dotenv`, and `sentence-transformers`. The `openai` package is the SDK. The provider is OpenRouter. `.venv` is Python 3.11 because `numpy==2.4.6` does not install on 3.9.
+`requirements.txt` pins `numpy`, `openai`, `pandas`, `python-dotenv`, `sentence-transformers`, `evaluate`, and `rouge_score`. The `openai` package is the SDK. The provider is OpenRouter. `.venv` is Python 3.11 because `numpy==2.4.6` does not install on 3.9.
+
+`rouge_score` is pinned explicitly even though nothing imports it directly: `evaluate` does not declare it as a dependency but `evaluate.load("rouge")` imports it at runtime, so a fresh install without it fails at first use rather than at install time. Worth knowing before setting up on a new machine.
+
+`evaluate.load()` fetches its builder script from the HuggingFace Hub on first call, about 7 seconds cold and cached afterwards. Both metrics are therefore loaded lazily behind `lru_cache` so importing `scoring.py` never pays that cost. The cache is warm on this machine; on a fresh one, BLEU or ROUGE needs network the first time it runs.
 
 `.env` keys the code reads:
 
@@ -292,12 +321,14 @@ Judge-agreement has no flag. It runs whenever `expected` exists and `--judge` wa
 `ROADMAP.md` section 4 tracks the full audit. What still changes how results should be read:
 
 - The accuracy rubric saturated at 5.00 on 15 of 16 rows in the hard-set run. A judge that gives nearly everything the same score has almost no discriminative power regardless of how well it correlates, so a saturated distribution is a reason to rewrite the rubric rather than to trust the mean. Check the histogram before quoting a judge score.
-- Variance was measured on one 16-question set with one model. The 0.001 run-to-run spread is that set's number, not a universal constant; rerun `--n-samples 3` on the real task before quoting an error bar.
-- Temperature 0 produces non-identical text on roughly a third of prompts. Scores are stable anyway on this set, but a task with looser answers (summarization, open-ended advice) could turn that wording drift into real score movement. Do not assume the 0.001 spread transfers.
+- Temperature 0 produces non-identical text on roughly a third of prompts. Scores were stable to ~0.001 on the short-answer set, but a task with looser answers (summarization, open-ended advice) could turn that wording drift into real score movement.
 - Quality means are computed over successful calls only, so a run with a high `failure_rate` has an optimistic headline score. The `n=` on each line is the denominator.
-- BLEU and ROUGE are our implementations, so the exact variant matters when comparing against a published number.
+- BLEU via `evaluate` scores a correct one-word answer 0 at the default order of 4. `score_bleu` caps `max_order` at the shorter text so that case is BLEU-1. Any BLEU number from here is therefore not comparable to a published BLEU-4 score.
+- `rouge2` is structurally 0 on any answer shorter than two tokens, correct or not. Real ROUGE behavior, but it makes the column uninformative on short-answer data.
+- Variance is no longer measurable on this branch. The prep finding (~0.001 spread on the hard set) is a talking point, not something re-derivable from a live run.
 
 ## Not built yet
 
 - No turnwise grader. Multi-turn transcripts are still one row per prompt, not one row per turn.
 - Run B timebox rehearsal has not been done. The demo run above is a smoke test, not a timed rehearsal.
+- No README. The repo is public and reads as unfinished without one.

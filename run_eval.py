@@ -170,13 +170,6 @@ def main():
         default=8,
         help="Concurrent inference calls. 1 runs sequentially. Default: 8.",
     )
-    parser.add_argument(
-        "--n-samples",
-        type=int,
-        default=1,
-        help="Ask each prompt this many times, as independent requests, to measure "
-             "run-to-run variance. Costs n times as many calls. Default: 1.",
-    )
     parser.add_argument("--system-prompt", type=str, default=None, help="System prompt to use")
     parser.add_argument(
         "--cot",
@@ -265,7 +258,6 @@ def main():
             max_tokens=args.max_tokens,
             timeout=args.timeout,
             max_workers=args.max_workers,
-            n_samples=args.n_samples,
             system_prompt=args.system_prompt,
             chain_of_thought=args.cot,
             # Setting output_csv also derives the checkpoint path
@@ -286,9 +278,6 @@ def main():
         if config.system_prompt:
             print(f"System prompt: {config.system_prompt[:50]}...")
         print(f"Chain of thought: {config.chain_of_thought}")
-        if config.n_samples > 1:
-            print(f"Samples per prompt: {config.n_samples} "
-                  f"({len(prompts) * config.n_samples} total calls)")
         print()
 
         # Run inference. Writes <run_id>_raw.csv itself before returning.
@@ -365,10 +354,9 @@ def main():
         if agreement:
             metrics["judge_agreement"] = agreement
 
-    # Variance, when the run sampled each prompt more than once. Like agreement,
-    # this needs no flag of its own: the sampling was already requested via
-    # --n-samples, and having paid for the extra calls there is no reason to
-    # make reporting on them a second opt-in. Returns None on a normal run.
+    # Variance no-ops on this branch: --n-samples was cut, so frames have no
+    # sample_index column and variance_report returns None. Left in place until
+    # the analysis module is reviewed.
     variance = variance_report(df)
     if variance:
         metrics["variance"] = variance

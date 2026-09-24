@@ -68,7 +68,7 @@ from openai import BadRequestError, OpenAI
 
 # Imported from the harness rather than reimplemented. One retry policy and one
 # checkpoint implementation across the repo; see the note in harness.py.
-from llm_eval.harness import Checkpoint, call_with_retry, make_client, message_text, row_key
+from llm_eval.harness import Checkpoint, call_with_retry, make_client, message_text
 
 load_dotenv()
 
@@ -631,18 +631,9 @@ def judge_batch(
     rows = list(df.to_dict(orient="records"))
     # The join key for checkpoint/resume and for final ordering. Falls back to
     # the positional index when a frame has no prompt_id, so this function still
-    # works on an arbitrary DataFrame.
-    #
-    # sample_index is part of the key for the same reason it is in the harness:
-    # an n_samples>1 frame has several rows sharing a prompt_id, and keying on
-    # prompt_id alone would collapse them. Here the consequence is worse than
-    # wasted calls — `fresh` would keep only the last judgment written for that
-    # prompt and then assign it to every one of its samples, so the variance
-    # being measured would be erased by the tool measuring it.
-    keys = [
-        row_key(row.get("prompt_id", i), row.get("sample_index", 0))
-        for i, row in enumerate(rows)
-    ]
+    # works on an arbitrary DataFrame. str() so an int prompt_id in the source
+    # still matches the same id written as a string in the checkpoint.
+    keys = [str(row.get("prompt_id", i)) for i, row in enumerate(rows)]
     checkpoint = Checkpoint(config.checkpoint_path)
 
     # Resume, same rule as the harness: a judgment that errored cost a call but
@@ -651,7 +642,7 @@ def judge_batch(
     if config.resume:
         for saved in checkpoint.load():
             if saved.get("judge_error") is None:
-                done[row_key(saved.get("prompt_id"), saved.get("sample_index", 0))] = saved
+                done[str(saved.get("prompt_id"))] = saved
 
     # Carries the original index alongside the row, so results can be filed back
     # into the right position after completing out of order.
@@ -687,12 +678,11 @@ def judge_batch(
             else None
         )
         prompt_id = row.get("prompt_id", index)
-        sample_index = row.get("sample_index", 0)
         result = judge_single(client, question, response, config, reference, label=str(prompt_id))
-        # prompt_id and sample_index are stored alongside the judgment so a
-        # resumed run can match it back to the right row. judge_single knows
-        # neither, so they are merged in here rather than there.
-        checkpoint.append({"prompt_id": prompt_id, "sample_index": sample_index, **result})
+        # prompt_id is stored alongside the judgment so a resumed run can match
+        # it back to the right row. judge_single knows neither the id nor the
+        # checkpoint, so they are merged in here rather than there.
+        checkpoint.append({"prompt_id": prompt_id, **result})
         if verbose:
             with counter_lock:
                 counter["n"] += 1

@@ -51,7 +51,6 @@ from llm_eval.harness import (
     batch_run,
     call_with_retry,
     classify_error,
-    row_key,
     run_single,
 )
 

@@ -1,6 +1,8 @@
 # Environment
 .env
 .env.*
+# ...but the template must be committed; it holds no secrets.
+!.env.example
 
 # Virtual environments
 mercor-interview-eval/
